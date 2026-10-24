@@ -84,12 +84,12 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-library"),
     let demoStore = LibraryStore(fileURL: tmpDir.appendingPathComponent(".cache.dat"))
     demoStore.load()
     demoStore.setMainWindowFrame(.init(x: 0, y: 0, width: 300, height: 500), primaryScreenHeight: 900)
-    demoStore.touch(fileName: FileManager.default.currentDirectoryPath + "/samples/GBK样例.txt")
-    demoStore.updateProgress(offset: 61, at: 0)          // GBK样例约 98 字
-    demoStore.touch(fileName: FileManager.default.currentDirectoryPath + "/samples/长篇小说样例.txt")
-    demoStore.updateProgress(offset: 7350, at: 0)        // 长篇小说样例约 13980 字
+    demoStore.touch(fileName: FileManager.default.currentDirectoryPath + "/samples/古文观止-GBK.txt")
+    demoStore.updateProgress(offset: 300, at: 0)          // 古文观止 GBK 版约 1125 字
+    demoStore.touch(fileName: FileManager.default.currentDirectoryPath + "/samples/古文观止.txt")
+    demoStore.updateProgress(offset: 700, at: 0)        // 古文观止约 1125 字
     _ = demoStore.addBookmark(offset: 500, at: 0)
-    _ = demoStore.addBookmark(offset: 1500, at: 0)
+    _ = demoStore.addBookmark(offset: 900, at: 0)
     demoStore.touch(fileName: "D:\\小说\\一本在 Windows 上的书.txt")
 
     let wc = LibraryWindowController(store: demoStore) { _ in }
@@ -159,9 +159,9 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-bookmarks"),
     try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
     let demoStore = LibraryStore(fileURL: tmpDir.appendingPathComponent(".cache.dat"))
     demoStore.load()
-    let bookPath = cwd + "/samples/长篇小说样例.txt"
+    let bookPath = cwd + "/samples/古文观止.txt"
     demoStore.touch(fileName: bookPath)
-    for off in [0, 1653, 5200, 9100] { _ = demoStore.addBookmark(offset: off, at: 0) }
+    for off in [0, 300, 700, 1000] { _ = demoStore.addBookmark(offset: off, at: 0) }
     let data = try? Data(contentsOf: URL(fileURLWithPath: bookPath))
     let decoded = data.flatMap { try? TextDecoder.decode($0) }
     let book = decoded.map { TextBook(fileURL: URL(fileURLWithPath: bookPath), rawText: $0.text, encodingName: $0.encodingName) }
@@ -221,9 +221,9 @@ if CommandLine.arguments.contains("--library-selftest") {
 
     let store = LibraryStore(fileURL: tmpDir.appendingPathComponent(".cache.dat"))
     store.load()
-    store.touch(fileName: cwd + "/samples/长篇小说样例.txt")
+    store.touch(fileName: cwd + "/samples/古文观止.txt")
     store.updateProgress(offset: 7000, at: 0)          // 约一半
-    store.touch(fileName: cwd + "/samples/GBK样例.txt")
+    store.touch(fileName: cwd + "/samples/古文观止-GBK.txt")
     store.touch(fileName: "D:\\小说\\搬走了的书.txt")   // 找不到
     log("书架: " + store.items.map { "\($0.displayName)@\($0.index)" }.joined(separator: " | "))
 
@@ -288,7 +288,7 @@ if CommandLine.arguments.contains("--library-selftest") {
     swc.debugSelectTab(0)
 
     log("--- 6) 进度口径一致性（真实的 ReadingView ↔ 阅读列表） ---")
-    let longPath = cwd + "/samples/长篇小说样例.txt"
+    let longPath = cwd + "/samples/古文观止.txt"
     if let data = try? Data(contentsOf: URL(fileURLWithPath: longPath)),
        let decoded = try? TextDecoder.decode(data) {
         let book = TextBook(fileURL: URL(fileURLWithPath: longPath),
@@ -327,11 +327,11 @@ if CommandLine.arguments.contains("--library-selftest") {
     wc.onBookRemoved = { removedPath = $0 }
     wc.onAllRemoved = { allRemoved = true }
 
-    let readingPath = store.items.first(where: { $0.fileName.contains("长篇小说样例") })?.fileName
-    let otherIdx = store.items.firstIndex(where: { $0.fileName.contains("GBK样例") }) ?? 0
+    let readingPath = store.items.first(where: { $0.fileName.contains("古文观止") })?.fileName
+    let otherIdx = store.items.firstIndex(where: { $0.fileName.contains("古文观止-GBK") }) ?? 0
     let otherPath = store.items[otherIdx].fileName
     wc.performRemove(at: otherIdx)
-    log("  移除 GBK样例 → 上报路径正确: \(removedPath == otherPath)")
+    log("  移除 古文观止-GBK → 上报路径正确: \(removedPath == otherPath)")
 
     if let keep = readingPath, let ki = store.items.firstIndex(where: { $0.fileName == keep }) {
         removedPath = nil
@@ -345,14 +345,14 @@ if CommandLine.arguments.contains("--library-selftest") {
     log("--- 8) 书签面板 ---")
     let bmStore = LibraryStore(fileURL: tmpDir.appendingPathComponent(".cache.dat.bm"))
     bmStore.load()
-    bmStore.touch(fileName: cwd + "/samples/长篇小说样例.txt")
+    bmStore.touch(fileName: cwd + "/samples/古文观止.txt")
     var jumped: Int?
     let bwc = BookmarkWindowController(store: bmStore) { jumped = $0 }
     bwc.update(book: nil)
     log("  未打开书时提示: \(bwc.window.isVisible ? "" : "(窗口未显示)")")
-    for off in [0, 1653, 5200] { _ = bmStore.addBookmark(offset: off, at: 0) }
-    let bmData = try? Data(contentsOf: URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt"))
-    let bmBook = bmData.flatMap { d in (try? TextDecoder.decode(d)).map { TextBook(fileURL: URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt"), rawText: $0.text, encodingName: $0.encodingName) } }
+    for off in [0, 300, 700] { _ = bmStore.addBookmark(offset: off, at: 0) }
+    let bmData = try? Data(contentsOf: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
+    let bmBook = bmData.flatMap { d in (try? TextDecoder.decode(d)).map { TextBook(fileURL: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"), rawText: $0.text, encodingName: $0.encodingName) } }
     bwc.update(book: bmBook)
     log("  载入后表格行数 = \(bwc.numberOfRows(in: bwc.window.contentView?.subviews.compactMap { $0 as? NSScrollView }.first?.documentView as? NSTableView ?? NSTableView()))")
     log("  书签数 = \(bmStore.items.first?.marks.count ?? -1)")
@@ -379,7 +379,7 @@ if CommandLine.arguments.contains("--library-selftest") {
     NSApp.delegate = ad
     ad.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     LibraryStore.shared.updateSettings { $0.autoPageIntervalMS = 1000; $0.autoPageMode = 0 }
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt"))
+    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     do {
         let beforeAuto = ad.debugPageStart
         ad.toggleAutoPage(nil)
@@ -443,14 +443,14 @@ if CommandLine.arguments.contains("--library-selftest") {
             log("  \(enc) 往返: ❌ 编码失败")
         }
     }
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt"))
+    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     ad.toggleEditMode(nil)
     log("  进入编辑模式: \(ad.debugEditModeActive ? "✅" : "❌")")
     ad.toggleEditMode(nil)
     log("  未改动退出: \(ad.debugEditModeActive ? "❌ 还在编辑" : "✅ 已退出（未弹保存框）")")
 
     log("--- 11) 沉浸模式（隐藏顶栏和底栏） ---")
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt"))
+    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     LibraryStore.shared.updateSettings { $0.hideChrome = false }
     ad.toggleHideChrome(nil)   // 先确保是「关」，下一行再开
     if LibraryStore.shared.settings.hideChrome { ad.toggleHideChrome(nil) }
@@ -477,7 +477,7 @@ if CommandLine.arguments.contains("--library-selftest") {
     // 关键回归：透明时窗口阴影必须关掉。isOpaque=false 的窗口，macOS 按 alpha
     // 蒙版算阴影；背景透明后只剩文字不透明 → 阴影变成「文字轮廓」，
     // 看起来就是每个字后面拖着一层虚影（用户形容为「视网膜残留」）。
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt"))
+    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     LibraryStore.shared.updateSettings { $0.alpha = 255 }
     ad.toggleHideChrome(nil); ad.toggleHideChrome(nil)     // 触发一次 applyWindowChrome
     log("  alpha=255: 窗口不透明=\(ad.debugWindowOpaque)  有阴影=\(ad.debugWindowHasShadow)")
@@ -495,7 +495,7 @@ if CommandLine.arguments.contains("--library-selftest") {
 
     log("--- 14) 平滑滚动动画 ---")
     // 前面单测都是直接调 applyScroll（绕过动画），这里验证定时器这条真实路径
-    let animURL = URL(fileURLWithPath: cwd + "/samples/长篇小说样例.txt")
+    let animURL = URL(fileURLWithPath: cwd + "/samples/古文观止.txt")
     if let d = try? Data(contentsOf: animURL), let txt = try? TextDecoder.decode(d) {
         let animBook = TextBook(fileURL: animURL, rawText: txt.text, encodingName: txt.encodingName)
         let av = ReadingView(frame: NSRect(x: 0, y: 0, width: 420, height: 660))
@@ -536,9 +536,9 @@ if CommandLine.arguments.contains("--dump-touchbar") {
     // 验证「懒加载」这条容易出错的路径：
     // 触控栏条目是系统在需要时才创建的。如果 App 先更新了进度文字、
     // 之后系统才创建标签控件，文字不能丢（真机上换书时就是这个顺序）。
-    let sampleStatus = ReadingStatus.compact(bookName: "长篇小说样例",
+    let sampleStatus = ReadingStatus.compact(bookName: "古文观止",
                                              chapterTitle: "第1章 测试章节标题",
-                                             offset: 1719, totalLength: 13980)
+                                             offset: 500, totalLength: 1125)
     ReaderTouchBar.shared.updateProgress(sampleStatus)
     let probe2 = AppDelegate()
     let bar2 = ReaderTouchBar.shared.makeTouchBar(target: probe2)
@@ -574,14 +574,14 @@ app.setActivationPolicy(.regular)
 
 if earlyOpenSelftest {
     let cwd = FileManager.default.currentDirectoryPath
-    let file = cwd + "/samples/长篇小说样例.txt"
+    let file = cwd + "/samples/古文观止.txt"
     FileHandle.standardError.write("模拟启动前的打开请求: \(file)\n".data(using: .utf8)!)
     // 此刻 must 还没建窗口
     _ = delegate.application(app, openFile: file)
     FileHandle.standardError.write("  openFile 回调已返回，窗口就绪=\(delegate.debugIsWindowReady)（应为 false）\n".data(using: .utf8)!)
     DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
         let opened = delegate.debugCurrentBookPath ?? ""
-        if opened.contains("长篇小说样例") {
+        if opened.contains("古文观止") {
             FileHandle.standardError.write("✅ 启动前的打开请求被挂起并在窗口建好后正确打开\n".data(using: .utf8)!)
             exit(0)
         } else {

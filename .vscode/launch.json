@@ -15,7 +15,7 @@
       "request": "launch",
       "name": "调试 Reader（打开 GBK 样例）",
       "program": "${workspaceFolder}/dist/Reader.app/Contents/MacOS/Reader",
-      "args": ["${workspaceFolder}/samples/GBK样例.txt"],
+      "args": ["${workspaceFolder}/samples/古文观止-GBK.txt"],
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "build"
     }

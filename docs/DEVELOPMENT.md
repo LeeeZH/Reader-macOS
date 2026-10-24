@@ -48,11 +48,11 @@ swiftc --version    # 应输出 Apple Swift version 6.x
 不需要开窗口、不需要截图权限，直接把某一页渲染成图片，用来检查排版：
 
 ```bash
-# 把 GBK 样例的第 1 页渲染出来
-./dist/Reader.app/Contents/MacOS/Reader --render-page samples/GBK样例.txt /tmp/page.png
+# 把样书第 1 页渲染出来（GBK 编码版，顺便验证解码）
+./dist/Reader.app/Contents/MacOS/Reader --render-page samples/古文观止-GBK.txt /tmp/page.png
 
 # 渲染第 3 页（页码从 0 开始）
-./dist/Reader.app/Contents/MacOS/Reader --render-page samples/长篇小说样例.txt /tmp/p3.png 2
+./dist/Reader.app/Contents/MacOS/Reader --render-page samples/古文观止.txt /tmp/p3.png 2
 ```
 
 输出还会带上这一页的字符区间（如 `本页偏移=709..1104`），
@@ -73,7 +73,7 @@ $B --render-page 书.txt /tmp/mid.png 0 220       # 第 5 个参数 = 平滑滚�
 **导出分页表（parity / 回归用）**：
 
 ```bash
-$B --dump-pages samples/长篇小说样例.txt 420 660
+$B --dump-pages samples/古文观止.txt 420 660
 # page  start  length  lines  chapter
 # 0     0      382     24     1
 # 1     382    390     24     1
@@ -87,7 +87,7 @@ $B --dump-pages samples/长篇小说样例.txt 420 660
 **关窗自检**（复现「点关闭按钮后意外退出」）：
 
 ```bash
-$B --close-selftest samples/长篇小说样例.txt
+$B --close-selftest samples/古文观止.txt
 # 应当：打印"正在关闭主窗口" → 干净退出，退出码 0，且不产生崩溃报告
 ```
 
@@ -200,7 +200,8 @@ Reader/
 ├── test.sh                   核心逻辑单测
 ├── compile_commands.json     自动生成，给 sourcekit-lsp 用（已 gitignore）
 ├── Resources/Info.plist      Bundle 配置
-├── samples/GBK样例.txt       GBK 编码测试样例
+├── samples/古文观止.txt           样书（3 章，UTF-8）
+├── samples/古文观止-GBK.txt       同一本样书的 GBK 编码版
 ├── Tests/main.swift          单测入口
 ├── .vscode/                  tasks / launch / settings
 └── Sources/

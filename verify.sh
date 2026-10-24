@@ -20,7 +20,7 @@ step "2/5 单元测试"
 bash "$ROOT/test.sh" | tail -2
 
 step "3/5 应用启动冒烟"
-"$BIN" "$ROOT/samples/长篇小说样例.txt" >"$OUT/smoke.log" 2>&1 &
+"$BIN" "$ROOT/samples/古文观止.txt" >"$OUT/smoke.log" 2>&1 &
 PID=$!
 sleep 5
 if kill -0 "$PID" 2>/dev/null; then
@@ -39,7 +39,7 @@ step "4.5/5 关窗自检（曾因主窗口漏设 isReleasedWhenClosed 而段错�
 CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 BEFORE_CRASH=$(find "$CRASH_DIR" -name "Reader*.ips" 2>/dev/null | wc -l | tr -d ' ')
 set +e
-"$BIN" --close-selftest "$ROOT/samples/长篇小说样例.txt" >"$OUT/close.log" 2>&1
+"$BIN" --close-selftest "$ROOT/samples/古文观止.txt" >"$OUT/close.log" 2>&1
 CLOSE_CODE=$?
 set -e
 sleep 3
@@ -66,12 +66,12 @@ fi
 grep -E "✅" "$OUT/earlyopen.log" | sed 's/^/  /'
 
 step "5/5 离屏渲染"
-"$BIN" --render-page "$ROOT/samples/长篇小说样例.txt" "$OUT/page.png" 2 2>&1 | tail -1
-"$BIN" --dark --render-page "$ROOT/samples/长篇小说样例.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
+"$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
+"$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
 "$BIN" --render-library "$OUT/library.png" 2>&1 | tail -1
 "$BIN" --render-settings "$OUT/settings.png" 2>&1 | tail -1
 "$BIN" --render-bookmarks "$OUT/bookmarks.png" 2>&1 | tail -1
-"$BIN" --dump-pages "$ROOT/samples/长篇小说样例.txt" 2>&1 >"$OUT/pages.tsv" | tail -1
+"$BIN" --dump-pages "$ROOT/samples/古文观止.txt" 2>&1 >"$OUT/pages.tsv" | tail -1
 
 echo
 echo "✅ 全部通过。渲染产物在 $OUT/"

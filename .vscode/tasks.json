@@ -64,7 +64,7 @@
     {
       "label": "run with GBK sample",
       "type": "shell",
-      "command": "./dist/Reader.app/Contents/MacOS/Reader ./samples/GBK样例.txt",
+      "command": "./dist/Reader.app/Contents/MacOS/Reader ./samples/古文观止-GBK.txt",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -74,7 +74,7 @@
     {
       "label": "run with long sample",
       "type": "shell",
-      "command": "./dist/Reader.app/Contents/MacOS/Reader ./samples/长篇小说样例.txt",
+      "command": "./dist/Reader.app/Contents/MacOS/Reader ./samples/古文观止.txt",
       "options": {
         "cwd": "${workspaceFolder}"
       },

@@ -502,11 +502,11 @@ eq(ReaderSettings(header: ws2.document.header).lineGap, 5, "写窗口位置不�
 // ============ 10. 触控栏状态文字 ============
 print("\n[10] 触控栏状态文字（书名 · 章节 · 百分比）")
 
-eq(ReadingStatus.compact(bookName: "长篇小说样例", chapterTitle: "第1章 测试章节标题",
+eq(ReadingStatus.compact(bookName: "古文观止", chapterTitle: "第1章 测试章节标题",
                          offset: 1230, totalLength: 10000),
-   "长篇小说样例 · 第1章 测试章节标题 · 12.3%", "书名在最左、百分比在最右")
-eq(ReadingStatus.compact(bookName: "GBK样例", chapterTitle: nil, offset: 100, totalLength: 100),
-   "GBK样例 · 100.0%", "没有章节时只有书名与百分比")
+   "古文观止 · 第1章 测试章节标题 · 12.3%", "书名在最左、百分比在最右")
+eq(ReadingStatus.compact(bookName: "古文观止-GBK", chapterTitle: nil, offset: 100, totalLength: 100),
+   "古文观止-GBK · 100.0%", "没有章节时只有书名与百分比")
 eq(ReadingStatus.compact(bookName: "书", chapterTitle: "", offset: 0, totalLength: 100),
    "书 · 0.0%", "空章节标题被跳过")
 eq(ReadingStatus.compact(bookName: "", chapterTitle: "第三章", offset: 5, totalLength: 10),
@@ -533,7 +533,7 @@ func widthOf(_ text: String) -> CGFloat {
     (text as NSString).size(withAttributes: [.font: font13]).width
 }
 let samples = [
-    ReadingStatus.compact(bookName: "长篇小说样例", chapterTitle: "第1章 测试章节标题", offset: 1230, totalLength: 10000),
+    ReadingStatus.compact(bookName: "古文观止", chapterTitle: "第1章 测试章节标题", offset: 1230, totalLength: 10000),
     ReadingStatus.compact(bookName: "三体", chapterTitle: "第三章 射手与农场主", offset: 4560, totalLength: 10000),
     ReadingStatus.compact(bookName: "某本名字特别长的小说标题", chapterTitle: "第三卷 第七章 风起云涌", offset: 750, totalLength: 10000),
 ]
@@ -544,10 +544,10 @@ for t in samples {
     print(String(format: "    %6.1fpt  %@  %@", w, mark, t))
 }
 check(widthOf(samples[0]) < 450, "样例书的触控栏文字能放进可用宽度")
-check(ReadingStatus.compact(bookName: "长篇小说样例", chapterTitle: "第1章 测试章节标题",
+check(ReadingStatus.compact(bookName: "古文观止", chapterTitle: "第1章 测试章节标题",
                             offset: 1230, totalLength: 10000)
-        .hasPrefix("长篇小说样例"), "★ 中间截断时左侧书名一定保留")
-check(ReadingStatus.compact(bookName: "长篇小说样例", chapterTitle: "第1章 测试章节标题",
+        .hasPrefix("古文观止"), "★ 中间截断时左侧书名一定保留")
+check(ReadingStatus.compact(bookName: "古文观止", chapterTitle: "第1章 测试章节标题",
                             offset: 1230, totalLength: 10000)
         .hasSuffix("12.3%"), "★ 中间截断时右侧百分比一定保留")
 
@@ -776,7 +776,7 @@ check(allMatch, "★ 阅读界面、触控栏、阅读列表三处百分比永�
 let lastPage = 13930
 eq(ReadingStatus.libraryProgress(offset: lastPage, totalLength: 13980, isNew: false), "99.6%",
    "阅读列表按页首算（99.6%）")
-let barLast = ReadingStatus.full(bookName: "长篇小说样例", encoding: "UTF-8", totalLength: 13980,
+let barLast = ReadingStatus.full(bookName: "古文观止", encoding: "UTF-8", totalLength: 13980,
                                  chapterIndex: 19, chapterCount: 20,
                                  offset: lastPage, isLastPage: true)
 check(barLast.contains("99.6%"),
