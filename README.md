@@ -35,7 +35,24 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
 **能跑的电脑**：macOS 13 及以上 + Apple 芯片（M1 / M2 / M3 / M4…）。
 目前还不支持 Intel 芯片的 Mac。
 
-现在还没有现成的安装包，需要自己编译一次，步骤很简单：
+### 直接下载（推荐）
+
+[**↓ 下载 Reader 0.1.0**](https://github.com/LeeeZH/Reader-macOS/releases/latest/download/Reader-0.1.0-macos-arm64.zip)
+
+1. 解压 zip，得到 `Reader.app`
+2. 把它拖进「应用程序」文件夹
+3. **第一次打开请右键点 `Reader.app` → 选择「打开」** —— 本版没有做 Apple 公证，
+   直接双击会被系统拦下。之后就能正常双击启动了。
+
+如果系统提示「已损坏」或者你不想每次都右键，执行一次：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Reader.app
+```
+
+### 或者自己编译
+
+只要装过 Xcode 命令行工具就行（零第三方依赖）：
 
 ```bash
 # 1. 装编译工具（只需一次，装过会跳过）
@@ -46,9 +63,6 @@ xcode-select --install
 
 # 3. 把 dist/Reader.app 拖进「应用程序」文件夹，双击打开
 ```
-
-第一次打开如果提示「无法验证开发者」，在 Finder 里**右键点 Reader.app → 打开**，
-再点一次「打开」即可。之后就能正常双击启动了。
 
 > 没有 txt 也可以先试：`samples/` 目录里有一本样书《古文观止》
 > （`古文观止.txt`，另附 GBK 编码版 `古文观止-GBK.txt`），拖进窗口就能读。
