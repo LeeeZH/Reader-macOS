@@ -1,0 +1,13 @@
+{
+  "files.exclude": {
+    "**/.build": true,
+    "**/dist": true
+  },
+  "search.exclude": {
+    "**/.build": true,
+    "**/dist": true
+  },
+  "files.associations": {
+    "*.swift": "swift"
+  }
+}

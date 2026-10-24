@@ -1,0 +1,11 @@
+.build/
+dist/
+compile_commands.json
+.DS_Store
+*.xcuserstate
+# qlmanage 在输出目录不存在时会退到当前目录写，加个兜底
+*.svg.png
+
+# Windows 原版源码，仅供本地对照参考
+# 原项目无 LICENSE 且 README 明确禁止商用 —— 不要提交、不要随产物分发
+reference/

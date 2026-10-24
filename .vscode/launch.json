@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb-dap",
+      "request": "launch",
+      "name": "调试 Reader",
+      "program": "${workspaceFolder}/dist/Reader.app/Contents/MacOS/Reader",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build"
+    },
+    {
+      "type": "lldb-dap",
+      "request": "launch",
+      "name": "调试 Reader（打开 GBK 样例）",
+      "program": "${workspaceFolder}/dist/Reader.app/Contents/MacOS/Reader",
+      "args": ["${workspaceFolder}/samples/GBK样例.txt"],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "build"
+    }
+  ]
+}
