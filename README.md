@@ -1,7 +1,5 @@
 # Reader for Mac
 
-**把电脑里的 TXT 小说，读成书的样子。**
-
 Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动分好章节、排好版，
 下次打开还接着上次的位置；界面想怎么调就怎么调，不想被人看见时一键就能藏起来。
 
@@ -11,6 +9,8 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
 > 这一版是用 macOS 原生代码重写的，操作和外观更贴合 Mac，
 > 同时**阅读记录（存档）和 Windows 版通用**，书架、进度、书签都能带过来。
 
+## 界面
+
 <p align="center">
   <img src="docs/images/reading.png" width="420" alt="Reader 阅读窗口截图">
 </p>
@@ -19,6 +19,7 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
 
 ## 目录
 
+- [界面](#界面)
 - [装到电脑上](#装到电脑上)
 - [三分钟上手](#三分钟上手)
 - [主要功能](#主要功能)
@@ -49,8 +50,8 @@ xcode-select --install
 第一次打开如果提示「无法验证开发者」，在 Finder 里**右键点 Reader.app → 打开**，
 再点一次「打开」即可。之后就能正常双击启动了。
 
-> 没有 txt 也可以先试：项目里的 `samples/` 目录自带两本样书
-> （`长篇小说样例.txt` 和 `GBK样例.txt`），拖进窗口就能读。
+> 没有 txt 也可以先试：`samples/` 目录里有一本样书《古文观止》
+> （`古文观止.txt`，另附 GBK 编码版 `古文观止-GBK.txt`），拖进窗口就能读。
 
 ---
 
@@ -275,3 +276,5 @@ Reader 没有云同步，也刻意不联网。想换设备就手动搬一下存�
 ---
 
 **Reader 0.1.0** · macOS 13+ · Apple 芯片（arm64）
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
