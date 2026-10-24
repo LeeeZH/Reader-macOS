@@ -9,14 +9,6 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
 > 这一版是用 macOS 原生代码重写的，操作和外观更贴合 Mac，
 > 同时**阅读记录（存档）和 Windows 版通用**，书架、进度、书签都能带过来。
 
-## 界面
-
-<p align="center">
-  <img src="docs/images/reading.png" width="420" alt="Reader 阅读窗口截图">
-</p>
-
----
-
 ## 目录
 
 - [界面](#界面)
@@ -27,6 +19,14 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
 - [你的阅读数据在哪](#你的阅读数据在哪)
 - [常见问题](#常见问题)
 - [关于 Reader](#关于-reader)
+
+---
+
+## 界面
+
+<p align="center">
+  <img src="docs/images/reading.png" width="420" alt="Reader 阅读窗口截图">
+</p>
 
 ---
 

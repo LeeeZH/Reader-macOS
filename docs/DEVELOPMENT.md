@@ -202,6 +202,8 @@ Reader/
 ├── Resources/Info.plist      Bundle 配置
 ├── samples/古文观止.txt           样书（3 章，UTF-8）
 ├── samples/古文观止-GBK.txt       同一本样书的 GBK 编码版
+├── docs/DEVELOPMENT.md       开发笔记（本文件）
+├── docs/images/reading.png   README 用的界面截图
 ├── Tests/main.swift          单测入口
 ├── .vscode/                  tasks / launch / settings
 └── Sources/
@@ -542,6 +544,105 @@ macOS 版完全按同一格式读写，位置在：
   本项目沿用同样精神，不作商业分发；建议后续以 PR / 分支形式回馈上游。
 - `reference/Reader/` 下原版源码的可移植逻辑（`FormatText`、章节规则、`.cache.dat` 格式）
   在本项目中被重新实现，不是直接复制。
+
+---
+
+## 发版（Release）
+
+发行包**手动**发布。曾试过用 GitHub Actions 在 tag 上自动构建 + 发 Release，但 CI 的
+macOS 镜像与本地环境不一致，两次都挂在构建阶段，于是撤回（见 `2ffe6bf`）。
+以后要重做自动化，先在本地复现 CI 环境再上。
+
+### 1. 改版本号
+
+`Resources/Info.plist`：
+
+```xml
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+```
+
+下面所有命令里的版本号都**从 plist 读**，不要手抄。
+
+### 2. 构建 + 全量验证
+
+```bash
+./verify.sh
+# 构建 → 381 项单测 → 启动冒烟 → 窗口自检 → 离屏渲染，任何一步失败都会停
+```
+
+### 3. 打包（必须用 ditto，不能用 zip）
+
+GitHub Release 只接受**文件**，而 `Reader.app` 是目录，所以必须压缩；
+而且**不能用 `zip -r`**——它会丢扩展属性，app 签名随之失效，别人解压后打不开：
+
+```bash
+VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)
+ZIP="dist/Reader-${VERSION}-macos-arm64.zip"
+ditto -c -k --sequesterRsrc --keepParent dist/Reader.app "$ZIP"
+shasum -a 256 "$ZIP" > dist/SHA256SUMS.txt
+```
+
+打完之后**验证签名还在**（zip 方式弄错时这一步能立刻发现）：
+
+```bash
+rm -rf /tmp/relcheck && mkdir /tmp/relcheck
+ditto -x -k "$ZIP" /tmp/relcheck
+codesign --verify --deep --strict /tmp/relcheck/Reader.app && echo "签名 OK"
+```
+
+### 4. 打 tag 并推送
+
+tag 名就是 `v<版本>`：
+
+```bash
+git tag -a "v${VERSION}" -m "Reader ${VERSION}"
+git push origin "v${VERSION}"
+```
+
+### 5. 在网页上传
+
+打开 https://github.com/LeeeZH/Reader-macOS/releases/new （tag 已存在会自动选上）：
+
+- 标题：`Reader ${VERSION}`
+- 描述：粘下面的模板
+- 附件：`dist/Reader-${VERSION}-macos-arm64.zip` + `dist/SHA256SUMS.txt`
+- 不要勾 pre-release
+
+### 6. 上传后必须验证
+
+```bash
+# README 里用的就是这条永久链接，换版本也不用改
+curl -sL -o /tmp/dl.zip -w '%{http_code}\n' \
+  "https://github.com/LeeeZH/Reader-macOS/releases/latest/download/Reader-${VERSION}-macos-arm64.zip"
+shasum -a 256 /tmp/dl.zip     # 必须与 dist/SHA256SUMS.txt 一致
+```
+
+### 注意事项
+
+| 事项 | 说明 |
+|---|---|
+| 资产命名 | 保持 `Reader-<版本>-macos-arm64.zip`，README 的 `releases/latest/download/...` 才不用改 |
+| 未公证 | `build.sh` 只做 ad-hoc 签名。别人首次打开必须「右键 → 打开」，或 `xattr -dr com.apple.quarantine /Applications/Reader.app` |
+| 仅 arm64 | Intel Mac 跑不了，README 与 Release 说明都要写明 |
+| 体积 | Release 单文件上限 2 GiB；当前安装包 562 KB，完全不是问题 |
+
+### Release 说明模板
+
+````markdown
+macOS 原生 TXT 阅读器，重写自 binbyu/Reader，阅读存档与 Windows 版互通。
+
+## 下载安装
+1. 解压 zip，把 `Reader.app` 拖进「应用程序」
+2. **首次打开请右键 → 打开**（本版未做 Apple 公证）
+   或执行：`xattr -dr com.apple.quarantine /Applications/Reader.app`
+
+## 本次更新
+- （列出改动）
+
+## 校验
+SHA256 见本页 `SHA256SUMS.txt`
+````
 
 ---
 
