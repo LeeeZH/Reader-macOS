@@ -852,31 +852,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func aboutCredits() -> NSAttributedString {
         let credits = NSMutableAttributedString()
 
-        func line(_ text: String, spaceAfter: CGFloat = 0) {
+        /// 追加一行；`link` 非空时这一行是可点击的网址（点它用默认浏览器打开）。
+        /// 最后一行不补换行 —— 补了会多出一个空行，把内容顶出可视区。
+        func line(_ text: String, link: URL? = nil, spaceAfter: CGFloat = 0, isLast: Bool = false) {
             let paragraph = NSMutableParagraphStyle()
             paragraph.alignment = .center
             paragraph.paragraphSpacing = spaceAfter
-            credits.append(NSAttributedString(string: text + "\n", attributes: [
+            var attributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11),
-                .foregroundColor: NSColor.labelColor,
+                .foregroundColor: link == nil ? NSColor.labelColor : NSColor.linkColor,
                 .paragraphStyle: paragraph,
-            ]))
+            ]
+            if let link { attributes[.link] = link }
+            credits.append(NSAttributedString(string: isLast ? text : text + "\n",
+                                              attributes: attributes))
         }
 
         // 应用名 / 版本号由系统从 Info.plist 读出来自动显示，这里不用重复写
-        line("macOS 原生重写版（AppKit · 零第三方依赖）")
+        line("github.com/LeeeZH/Reader-macOS",
+             link: URL(string: "https://github.com/LeeeZH/Reader-macOS")!)
         line("Apple Silicon · macOS 13+", spaceAfter: 6)
         line("基于 binbyu/Reader（原作者 Binbin Yu）")
 
-        // 最后一行是可点击的链接：面板里点它会用默认浏览器打开
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        credits.append(NSAttributedString(string: "github.com/binbyu/Reader", attributes: [
-            .font: NSFont.systemFont(ofSize: 11),
-            .foregroundColor: NSColor.linkColor,
-            .paragraphStyle: paragraph,
-            .link: URL(string: "https://github.com/binbyu/Reader")!,
-        ]))
+        // 上游原项目（Windows 版）的链接
+        line("github.com/binbyu/Reader",
+             link: URL(string: "https://github.com/binbyu/Reader")!, isLast: true)
         return credits
     }
 
