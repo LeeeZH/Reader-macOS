@@ -1,0 +1,56 @@
+name: Release
+
+# 推 v* tag 时自动：构建 → 单测 → 打包 zip → 发 GitHub Release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: 构建并发布
+    # macos-14 是 arm64（Apple Silicon）runner；build.sh 本身也显式指定了 arm64 target
+    runs-on: macos-14
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          uname -m
+          swiftc --version
+
+      - name: 构建
+        run: ./build.sh
+
+      - name: 单元测试
+        run: ./test.sh
+
+      - name: 打包
+        id: pack
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ZIP="Reader-${VERSION}-macos-arm64.zip"
+          # 必须用 ditto：`zip -r` 会丢扩展属性，导致 app 签名失效
+          ditto -c -k --sequesterRsrc --keepParent dist/Reader.app "$ZIP"
+          shasum -a 256 "$ZIP" > SHA256SUMS.txt
+          echo "--- 产物 ---"
+          ls -lh "$ZIP" SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Reader ${{ github.ref_name }}
+          body_path: .github/release-notes.md
+          files: |
+            ${{ steps.pack.outputs.zip }}
+            SHA256SUMS.txt
+          fail_on_unmatched_files: true
