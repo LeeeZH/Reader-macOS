@@ -28,6 +28,12 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
   <img src="docs/images/reading.png" width="420" alt="Reader 阅读窗口截图">
 </p>
 
+<p align="center">
+  <img src="docs/images/摸鱼.png" width="860" alt="摸鱼模式：窗口半透明，浮在编辑器上面">
+  <br>
+  <sub>摸鱼模式：窗口调成半透明浮在别的软件上面 —— 背景透了，文字依然是清楚的</sub>
+</p>
+
 ---
 
 ## 装到电脑上
