@@ -592,8 +592,8 @@ macOS 镜像与本地环境不一致，两次都挂在构建阶段，于是撤�
 `Resources/Info.plist`：
 
 ```xml
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.1</string>
+<key>CFBundleVersion</key><string>2</string>
 ```
 
 下面所有命令里的版本号都**从 plist 读**，不要手抄。
@@ -602,7 +602,7 @@ macOS 镜像与本地环境不一致，两次都挂在构建阶段，于是撤�
 
 ```bash
 ./verify.sh
-# 构建 → 381 项单测 → 启动冒烟 → 窗口自检 → 离屏渲染，任何一步失败都会停
+# 构建 → 450 项单测 → 启动冒烟 → 窗口自检 → 离屏渲染，任何一步失败都会停
 ```
 
 ### 3. 打包（必须用 ditto，不能用 zip）
