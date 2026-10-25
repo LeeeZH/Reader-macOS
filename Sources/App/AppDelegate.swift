@@ -1,7 +1,8 @@
 import AppKit
 import UniformTypeIdentifiers
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate,
+                         NSMenuItemValidation {
 
     private var window: NSWindow!
     private var readingView: ReadingView!
@@ -23,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private var settingsWindow: SettingsWindowController?
     private var bookmarkWindow: BookmarkWindowController?
+    private var chapterSearchWindow: ChapterSearchWindowController?
     private let statusItemController = StatusItemController()
     private var globalHotKey: GlobalHotKey?
     private var autoPageTimer: Timer?
@@ -240,11 +242,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let book = TextBook(fileURL: url, rawText: decoded.text, encodingName: decoded.encodingName)
 
             let settings = library.settings
-            book.chapterRule = settings.chapterRule
+            // 规则和默认值相同时不会重复解析（大书打开能省一次全量解析）
+            book.applyChapterRule(settings.chapterRule)
             readingView.settings = settings
             readingView.book = book
             window.title = "\(book.displayName) — Reader"
-            refreshTOC()
 
             // 加入阅读列表（MRU 置顶；已存在则保留其进度）
             library.touch(fileName: url.path)
@@ -263,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             libraryWindow?.reload()
             bookmarkWindow?.update(book: book)
+            chapterSearchWindow?.update(book: book, currentOffset: readingView.pageStart)
             window.makeFirstResponder(readingView)
 
             if settings.didFallbackFont {
@@ -286,9 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         readingView.onProgressChange = nil
         readingView.book = nil
         bookmarkWindow?.update(book: nil)
+        chapterSearchWindow?.update(book: nil, currentOffset: 0)
         currentBookPath = nil
         window.title = "Reader"
-        refreshTOC()
     }
 
     // MARK: - 触控栏动作
@@ -629,6 +632,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         bookmarkWindow?.show()
     }
 
+    // MARK: - 章节搜索 / 跳转
+
+    /// 「跳转到章节…」：搜索框支持章节号和标题模糊匹配。
+    ///
+    /// 菜单栏「目录」第一项和快捷键 ⌘J 都走这里。目录菜单适合按位置翻，
+    /// 几千章的长篇里想直接找某一章、或只记得半句标题时，搜索更快。
+    @objc func showChapterSearch(_ sender: Any?) {
+        guard let book = readingView.book, !book.chapters.isEmpty else {
+            NSSound.beep()
+            statusLabel.stringValue = "没有可跳转的章节 —— 先打开一本书"
+            return
+        }
+        if chapterSearchWindow == nil {
+            chapterSearchWindow = ChapterSearchWindowController()
+            chapterSearchWindow?.onJump = { [weak self] chapterIndex in
+                guard let self = self,
+                      let book = self.readingView.book,
+                      book.chapters.indices.contains(chapterIndex) else { return }
+                self.readingView.jump(to: book.chapters[chapterIndex].index)
+                self.window.makeKeyAndOrderFront(nil)
+            }
+        }
+        chapterSearchWindow?.show(book: book, currentOffset: readingView.pageStart)
+    }
+
     // MARK: - 显示设置
 
     @objc func showSettings(_ sender: Any?) {
@@ -718,10 +746,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            s.autoPageIntervalMS != autoPageRunningIntervalMS || s.autoPageMode != autoPageRunningMode {
             scheduleAutoPageTick()
         }
-        // 章节解析规则变了要先重新解析章节，再重排 —— 否则标题判定用的是旧章节表
-        readingView.book?.chapterRule = s.chapterRule
+        // 章节解析规则变了要先重新解析章节，再重排 —— 否则标题判定用的是旧章节表。
+        // ⚠️ 只有规则真的变了才重解析：设置窗口的滑块是连续触发的，字号 / 行距 / 透明度
+        //    这些改动跟章节无关，无条件解析全书会让长篇小说的设置面板每拖一下卡一秒多。
+        if let book = readingView.book, book.chapterRule != s.chapterRule {
+            book.applyChapterRule(s.chapterRule)
+            // 章节表变了，搜索面板要同步（没显示时只记下来）
+            chapterSearchWindow?.update(book: book, currentOffset: readingView.pageStart)
+        }
         readingView.settings = s
-        refreshTOC()
     }
 
     // MARK: - 窗口尺寸记忆
@@ -999,13 +1032,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         zoomOut.target = self
         readMenu.addItem(zoomOut)
 
-        readMenu.addItem(.separator())
-        let toc = NSMenuItem(title: "目录", action: nil, keyEquivalent: "")
-        toc.submenu = NSMenu(title: "目录")
-        readMenu.addItem(toc)
-        self.tocMenu = toc.submenu
-
         readItem.submenu = readMenu
+
+        // --- 目录 ---
+        // 目录从「阅读」的二级菜单提到菜单栏一级：长篇小说动辄几千章，
+        // 藏在二级菜单里不好找。菜单内容在 `menuNeedsUpdate` 里按需重建 ——
+        // 每开一本书 / 改一次设置就建几千个 NSMenuItem 会卡主线程
+        // （设置里的行距、透明度都是拖动即改的滑块）。
+        let tocItem = NSMenuItem()
+        main.addItem(tocItem)
+        let tocMenu = NSMenu(title: "目录")
+        tocMenu.delegate = self
+        tocItem.submenu = tocMenu
+        self.tocMenu = tocMenu
+        // 先放占位项：空子菜单会被 AppKit 当成不可用，用户根本没机会点开触发刷新
+        rebuildTOCMenu()
 
         // --- 视图 ---
         let viewItem = NSMenuItem()
@@ -1031,34 +1072,136 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = main
     }
 
-    /// 文件打开后刷新「目录」菜单
-    func refreshTOC() {
-        guard let tocMenu = tocMenu else { return }
+    // MARK: - 目录菜单
+
+    /// 用户每次点开「目录」都会先走这里，按当前书重建整个菜单。
+    ///
+    /// 只在真正要显示时建：章节可能几千条，打开书 / 拖动设置滑块时
+    /// 没必要提前建一遍。顺便让「当前章打勾」永远是最新的
+    /// （翻了几页之后再打开目录，勾会跟着走）。
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === tocMenu else { return }
+        rebuildTOCMenu()
+    }
+
+    /// 重建「目录」菜单 —— **列出全书章节，不设数量上限**。
+    ///
+    /// 旧版只列前 300 章，几千章的长篇小说从第 301 章起在目录里点不到。
+    ///
+    /// 菜单打开时从**当前正在读的章节**开始列（旧行为总是从第 1 章开始，
+    /// 读到两千章的人得先滚两千行）。当前章之前的章节收进顶部的
+    /// 「前面的章节」子菜单，平铺部分的第一项就是当前章。
+    private func rebuildTOCMenu() {
+        guard let tocMenu else { return }
         tocMenu.removeAllItems()
-        guard let book = readingView.book else {
-            let none = NSMenuItem(title: "（未打开文件）", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            tocMenu.addItem(none)
+
+        // 「跳转到章节…」固定在目录最上面：几千章的书，输入比滚动快。
+        // ⌘J 也能直接呼出（菜单项在启动时就会建出来，快捷键常驻）。
+        let searchItem = NSMenuItem(title: "跳转到章节…",
+                                    action: #selector(showChapterSearch(_:)), keyEquivalent: "j")
+        searchItem.target = self
+        tocMenu.addItem(searchItem)
+        tocMenu.addItem(.separator())
+
+        guard let book = readingView?.book else {
+            tocMenu.addItem(placeholder("（未打开文件）"))
             return
         }
-        if book.chapters.isEmpty {
-            let none = NSMenuItem(title: "（未识别到章节）", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            tocMenu.addItem(none)
+        guard !book.chapters.isEmpty else {
+            tocMenu.addItem(placeholder("（未识别到章节）"))
             return
         }
-        for (i, ch) in book.chapters.prefix(300).enumerated() {
-            let item = NSMenuItem(title: "\(i + 1). \(ch.title)",
-                                  action: #selector(jumpToChapter(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = i
-            tocMenu.addItem(item)
+
+        let current = book.chapterIndex(at: readingView.pageStart)
+        let sections = TOCMenuContent.sections(chapters: book.chapters, currentIndex: current)
+
+        // 前面的章节：收进子菜单，倒序（前一章在最上面，符合「往回翻」的直觉），
+        // 避免把当前章挤到菜单列表的下方
+        if !sections.earlier.isEmpty {
+            let earlierItem = NSMenuItem(
+                title: "↑ 前面的章节（共 \(sections.earlier.count) 章，由近到远）",
+                action: nil, keyEquivalent: "")
+            let earlierMenu = NSMenu(title: "前面的章节")
+            for entry in sections.earlier {
+                earlierMenu.addItem(tocMenuItem(for: entry))
+            }
+            earlierItem.submenu = earlierMenu
+            tocMenu.addItem(earlierItem)
+            tocMenu.addItem(.separator())
         }
-        if book.chapters.count > 300 {
-            let more = NSMenuItem(title: "…共 \(book.chapters.count) 章（此处只列前 300）",
-                                  action: nil, keyEquivalent: "")
-            more.isEnabled = false
-            tocMenu.addItem(more)
+
+        // 当前章 + 后面的章节：平铺，当前章在第一行并打勾
+        for entry in sections.active {
+            tocMenu.addItem(tocMenuItem(for: entry))
         }
     }
+
+    /// 一条可点击的目录项（章节序号存在 `tag` 里，`jumpToChapter` 直接读）
+    private func tocMenuItem(for entry: TOCMenuContent.Entry) -> NSMenuItem {
+        let item = NSMenuItem(title: entry.title,
+                              action: #selector(jumpToChapter(_:)), keyEquivalent: "")
+        item.target = self
+        item.tag = entry.chapterIndex
+        item.state = entry.isCurrent ? .on : .off
+        return item
+    }
+
+    private func placeholder(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    // MARK: - 菜单校验
+
+    /// 没打开书时禁用「跳转到章节…」和目录里的章节项 —— 自动启用只会让它们看着能点，
+    /// 点下去却什么都没发生。
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(showChapterSearch(_:)) {
+            guard let book = readingView?.book else { return false }
+            return !book.chapters.isEmpty
+        }
+        if menuItem.action == #selector(jumpToChapter(_:)) {
+            return readingView?.book != nil
+        }
+        return true
+    }
+
+    // MARK: - 自检探针
+
+    /// 自检用：强制按当前书重建「目录」菜单，返回全部菜单项标题
+    var debugTOCMenuTitles: [String] {
+        rebuildTOCMenu()
+        return tocMenu?.items.map(\.title) ?? []
+    }
+
+    /// 自检用：菜单栏一级菜单标题（App 菜单没有 title，显示为空串）
+    var debugTopLevelMenuTitles: [String] {
+        (NSApp.mainMenu?.items ?? []).map { $0.submenu?.title ?? $0.title }
+    }
+
+    /// 自检用：「阅读」菜单里的菜单项标题
+    var debugReadMenuTitles: [String] {
+        let readMenu = NSApp.mainMenu?.items.first { $0.submenu?.title == "阅读" }?.submenu
+        return (readMenu?.items ?? []).map(\.title)
+    }
+
+    /// 自检用：取「目录」菜单里的第 n 项（真正点它，验证跳转接线）
+    func debugTOCMenuItem(at index: Int) -> NSMenuItem? {
+        rebuildTOCMenu()
+        guard let items = tocMenu?.items, items.indices.contains(index) else { return nil }
+        return items[index]
+    }
+
+    /// 自检用：当前书的章节表版本号（用来确认改显示设置不会重解析章节）
+    var debugChapterParseGeneration: Int { readingView?.book?.chapterParseGeneration ?? -1 }
+
+    /// 自检用：章节搜索面板是否可见
+    var debugChapterSearchVisible: Bool { chapterSearchWindow?.window.isVisible ?? false }
+
+    /// 自检用：章节搜索面板（直接驱动搜索框 / 表格）
+    var debugChapterSearch: ChapterSearchWindowController? { chapterSearchWindow }
+
+    /// 自检用：等价于点菜单「跳转到章节…」（顺带验证菜单动作接线）
+    func debugShowChapterSearch() { showChapterSearch(nil) }
 }

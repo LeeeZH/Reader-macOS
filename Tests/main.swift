@@ -1312,6 +1312,211 @@ mv.jump(to: 0)
 mv.performMouseActionForTest(mv.settings.mouseLeftAction)
 check(mv.pageStart > 0, "★ 关掉「左右一起按」后左键照样翻页")
 
+// ============ 20. 目录菜单：全部章节，不设 300 章上限 ============
+print("\n[20] 目录菜单内容（回归：旧版只列前 300 章）")
+
+// 造一本 1200 章的书。默认规则认「第 N 章」，与真实小说一致。
+var tocText = ""
+for i in 1...1200 {
+    tocText += "第\(i)章 测试章节\(i)\n\n这是第\(i)章的正文，用来占位。\n\n"
+}
+let tocBook = TextBook(fileURL: tmp.appendingPathComponent("toc.txt"),
+                       rawText: tocText, encodingName: "UTF-8")
+eq(tocBook.chapters.count, 1200, "构造出的书有 1200 章")
+
+// 当前停在第 301 章（下标 300）—— 正是旧版被截断的位置
+let tocEntries = TOCMenuContent.entries(chapters: tocBook.chapters, currentIndex: 300)
+eq(tocEntries.count, tocBook.chapters.count, "★ 目录条目数 = 全书章节数（没有上限）")
+check(tocEntries.count > 300, "★ 超过 300 章也全部列出")
+eq(tocEntries[300].chapterIndex, 300, "第 301 项的章节下标正确")
+check(tocEntries[300].title.hasPrefix("301. "), "第 301 项带全书序号", tocEntries[300].title)
+check(tocEntries[300].title.contains("第301章"), "第 301 项标题来自书里的章节名")
+check(tocEntries[300].isCurrent, "★ 当前章（第 301 章）打勾")
+check(!tocEntries[299].isCurrent && !tocEntries[301].isCurrent, "只有当前章打勾")
+check(tocEntries.last?.title.contains("第1200章") == true, "最后一章也在目录里",
+      tocEntries.last?.title ?? "无")
+
+// 边界：空章节表 / 当前章下标越界都不该崩
+check(TOCMenuContent.entries(chapters: [], currentIndex: 0).isEmpty, "没有章节时目录为空")
+check(TOCMenuContent.entries(chapters: tocBook.chapters, currentIndex: -1).allSatisfy { !$0.isCurrent },
+      "当前下标为负时不打勾")
+check(TOCMenuContent.entries(chapters: tocBook.chapters, currentIndex: 99999).allSatisfy { !$0.isCurrent },
+      "当前下标越界时不打勾")
+
+// 20.2 菜单打开时从当前章开始显示（前面的章节收进顶部子菜单）
+print("\n[20.2] 目录从当前章开始显示")
+let tocSections = TOCMenuContent.sections(chapters: tocBook.chapters, currentIndex: 300)
+eq(tocSections.earlier.count, 300, "当前章之前的 300 章进顶部子菜单")
+eq(tocSections.active.count, 900, "当前章及之后的 900 章平铺")
+eq(tocSections.active.first?.chapterIndex, 300, "★ 平铺部分第一项是当前章（不是第 1 章）")
+check(tocSections.active.first?.isCurrent == true, "★ 平铺第一项就是打勾的当前章")
+check(tocSections.earlier.allSatisfy { !$0.isCurrent }, "子菜单里的旧章节都不打勾")
+eq(tocSections.earlier.first?.chapterIndex, 299, "★ 前面的章节由近到远，第一项是当前章的前一章")
+eq(tocSections.earlier.last?.chapterIndex, 0, "前面的章节最后一项是第 1 章")
+check(tocSections.earlier.map(\.chapterIndex) == Array((0..<300).reversed()),
+      "前面的章节整体倒序（往回翻的直觉）")
+eq(tocSections.earlier.count + tocSections.active.count, tocBook.chapters.count,
+   "两段加起来覆盖全书，一章不少")
+
+// 当前在第 1 章：不需要「前面的章节」子菜单，行为和以前一样平铺
+let tocAtStart = TOCMenuContent.sections(chapters: tocBook.chapters, currentIndex: 0)
+check(tocAtStart.earlier.isEmpty, "第 1 章时没有「前面的章节」子菜单")
+eq(tocAtStart.active.count, tocBook.chapters.count, "第 1 章时全书平铺")
+eq(tocAtStart.active.first?.chapterIndex, 0, "平铺第一项仍是第 1 章")
+
+// 当前章非法（没书 / 越界）：全部平铺（方便预览，也保持原行为）
+check(TOCMenuContent.sections(chapters: tocBook.chapters, currentIndex: nil).earlier.isEmpty,
+      "当前章未知时不切分子菜单")
+eq(TOCMenuContent.sections(chapters: [], currentIndex: 3).active.count, 0, "空书时没有内容")
+
+// ============ 21. 章节搜索（跳转到章节…） ============
+print("\n[21] 章节模糊搜索内核 ChapterSearch")
+
+// 造一本 1200 章的书：其中一章改用中文数字标题（真实小说里很常见），
+// 第 3 章带英文，用来验证大小写不敏感。默认规则仍能识别全部 1200 章。
+var searchText = ""
+for i in 1...1200 {
+    let title: String
+    switch i {
+    case 3:   title = "第3章 The End"
+    case 122: title = "第一百二十二章 山门旧事"
+    default:  title = "第\(i)章 测试章节\(i)"
+    }
+    searchText += "\(title)\n\n这是第\(i)章的正文，用来占位。\n\n"
+}
+let searchBook = TextBook(fileURL: tmp.appendingPathComponent("search.txt"),
+                          rawText: searchText, encodingName: "UTF-8")
+eq(searchBook.chapters.count, 1200, "搜索用书籍解析出 1200 章")
+eq(searchBook.chapters[121].title, "第一百二十二章 山门旧事",
+   "第 122 章标题是中文数字版本")
+
+let firstHit: (String) -> ChapterSearchHit? = {
+    ChapterSearch.search($0, in: searchBook.chapters).first
+}
+
+// 21.1 章节号优先：五种写法都要把第 122 章排第一
+for query in ["122", "第122章", "一百二十二", "第一百二十二章", "１２２"] {
+    eq(firstHit(query)?.chapterIndex, 121, "★ 查询「\(query)」首个命中第 122 章")
+}
+eq(firstHit("122")?.chapterNumber, 122, "命中的 chapterNumber 是 1-based 的 122")
+eq(firstHit("122")?.title, "第一百二十二章 山门旧事",
+   "命中项保留标题原文（不折叠、不做全半角归一）")
+
+// 第 1122 章的标题里含「122」，但它不能排到第 122 章前面
+let numberHits = ChapterSearch.search("122", in: searchBook.chapters)
+if let decoy = numberHits.first(where: { $0.chapterIndex == 1121 }) {
+    check(decoy.score < (numberHits.first?.score ?? 0),
+          "★ 第 1122 章（标题含 122）排在第 122 章之后")
+} else {
+    check(false, "★ 第 1122 章（标题含 122）排在第 122 章之后", "第 1122 章没有出现在结果里")
+}
+check(numberHits.first.map { $0.score > (numberHits.dropFirst().first?.score ?? 0) } ?? false,
+      "结果按 score 降序")
+
+// 21.2 标题模糊：连续子串命中要排在跳字命中前面
+let jumpHit = firstHit("山门事")            // 山门 + 跳字 + 事
+let substringHit = firstHit("山门旧事")     // 标题里的连续原文
+eq(jumpHit?.chapterIndex, 121, "★ 跳字查询「山门事」命中第 122 章")
+eq(substringHit?.chapterIndex, 121, "★ 连续子串「山门旧事」命中第 122 章")
+check((substringHit?.score ?? 0) >= (jumpHit?.score ?? 0), "连续子串分数不低于跳字分数")
+check((substringHit?.score ?? 0) > (jumpHit?.score ?? 0),
+      "连续子串分数严格高于跳字分数（同一章）")
+
+// 21.3 空查询 / 无命中
+let allHits = ChapterSearch.search("", in: searchBook.chapters)
+eq(allHits.count, 1200, "★ 空查询返回全部 1200 章")
+check(allHits.map(\.chapterIndex) == Array(0..<1200), "空查询保持章节顺序")
+check(allHits.allSatisfy { $0.score == 0 }, "空查询每一项 score 都是 0")
+eq(allHits.first?.chapterNumber, 1, "空查询首项章节号是 1")
+eq(allHits.last?.chapterNumber, 1200, "空查询末项章节号是 1200")
+eq(ChapterSearch.search("   \t\n", in: searchBook.chapters).count, 1200,
+   "全空白查询等同空查询")
+eq(ChapterSearch.search("　　", in: searchBook.chapters).count, 1200,
+   "全角空格查询等同空查询")
+check(ChapterSearch.search("不存在的标题", in: searchBook.chapters).isEmpty, "无关键词时返回空数组")
+check(ChapterSearch.search("山门事", in: []).isEmpty, "空章节表不崩、结果为空")
+
+// 21.4 大小写与首尾空白
+eq(firstHit("  山门事  ")?.chapterIndex, 121, "★ 忽略查询首尾空白")
+eq(firstHit("　山门事　")?.chapterIndex, 121, "★ 忽略查询首尾全角空格")
+eq(firstHit("the end")?.chapterIndex, 2, "★ 英文小写查询命中第 3 章")
+eq(firstHit("  THE END  ")?.chapterIndex, 2, "★ 英文大写 + 首尾空白也能命中")
+eq(firstHit("第3章 the end")?.chapterIndex, 2, "英文标题大小写不影响命中")
+
+// 21.5 中文数字解析（12 / 122 / 1001 / 12000）
+let numeralChapters = [
+    Chapter(index: 0, title: "第十二章 测试", titleLength: 7),
+    Chapter(index: 100, title: "第一百二十二章 测试", titleLength: 9),
+    Chapter(index: 200, title: "第一千零一章 测试", titleLength: 9),
+    Chapter(index: 300, title: "第一万二千章 测试", titleLength: 10),
+]
+eq(ChapterSearch.search("十二", in: numeralChapters).first?.chapterIndex, 0,
+   "中文数字「十二」解析为 12")
+eq(ChapterSearch.search("第一百二十二章", in: numeralChapters).first?.chapterIndex, 1,
+   "带「第…章」的中文数字解析为 122")
+eq(ChapterSearch.search("一千零一", in: numeralChapters).first?.chapterIndex, 2,
+   "★「一千零一」解析为 1001")
+eq(ChapterSearch.search("一万二千", in: numeralChapters).first?.chapterIndex, 3,
+   "★「一万二千」解析为 12000")
+
+// 21.6 性能：每敲一个键都会重算，1200 章必须停留在毫秒级（只打印，不断言过死）
+let searchStart = Date()
+let perfHits = ChapterSearch.search("山门", in: searchBook.chapters)
+let searchMs = Date().timeIntervalSince(searchStart) * 1000
+print(String(format: "  ⏱ 1200 章单次搜索耗时 %.2f ms", searchMs) + "（命中 \(perfHits.count) 章）")
+check(searchMs < 100, "1200 章单次搜索在 100 ms 内", String(format: "%.2f ms", searchMs))
+
+// ============ 22. 改设置不该重复解析章节（大书设置面板卡顿回归） ============
+print("\n[22] 章节规则只在真正变化时重解析")
+
+// 背景：设置窗口的滑块是 isContinuous，每拖一下都会走 applySettingsToReader()。
+// 旧逻辑无条件执行 `book.chapterRule = s.chapterRule`，章节解析的 didSet 会把
+// 整本书重新解析一遍 —— 6.4M 个 UTF-16 码元实测约 1.3 秒/次，拖字号、行距全卡。
+var parseRuleSame = ChapterRule()
+check(parseRuleSame == ChapterRule(), "默认规则相等（按字段比较）")
+var parseRuleKeyword = ChapterRule()
+parseRuleKeyword.kind = .keyword
+parseRuleKeyword.keyword = "第"
+check(parseRuleKeyword != parseRuleSame, "不同解析规则不相等")
+
+let parseBook = TextBook(fileURL: tmp.appendingPathComponent("parse-cost.txt"),
+                         rawText: tocText, encodingName: "UTF-8")
+let parseGen = parseBook.chapterParseGeneration
+parseBook.applyChapterRule(parseBook.chapterRule)
+eq(parseBook.chapterParseGeneration, parseGen, "★ 规则没变时不重新解析（字号/行距滑块不该卡）")
+parseBook.applyChapterRule(parseRuleKeyword)
+eq(parseBook.chapterParseGeneration, parseGen + 1, "规则变了才重新解析一次")
+eq(parseBook.chapterRule, parseRuleKeyword, "章节规则已更新")
+
+// 重新解析后，「章前分页」用的章节起点缓存必须同步重建
+let parseGen2 = parseBook.chapterParseGeneration
+parseBook.applyChapterRule(ChapterRule())
+eq(parseBook.chapterParseGeneration, parseGen2 + 1, "切回默认规则再解析一次")
+let parseMidOffset = parseBook.chapters[600].index
+check(parseBook.isChapterStart(at: parseMidOffset),
+      "重解析后章节起点缓存同步更新（不会拿旧章节表分页）")
+
+// ============ 23. 设置面板：滑块右侧数字要跟着滑块走 ============
+print("\n[23] 设置面板滑块数值标签")
+
+// 背景：addSliderRow 里的数值标签原来是局部变量，创建后没人更新 ——
+// 拖字距/行距/段距时正文变了，设置里的数字却一直停在初始值。
+_ = NSApplication.shared
+let spacingStore = LibraryStore(fileURL: tmp.appendingPathComponent("settings-labels.dat"))
+spacingStore.load()
+spacingStore.updateSettings {
+    $0.charGap = 3
+    $0.lineGap = 22
+    $0.paragraphGap = 15
+    $0.leftLineCount = 2
+}
+let spacingWC = SettingsWindowController(store: spacingStore) { }
+eq(spacingWC.debugSpacingLabelValues, ["3", "22", "15", "2"],
+   "★ 打开设置时数字标签显示存档里的值")
+spacingWC.debugSetSpacing(charGap: 4, lineGap: 30, paraGap: 20, overlap: 1)
+eq(spacingWC.debugSpacingLabelValues, ["4", "30", "20", "1"],
+   "★ 拖动滑块时右侧数字同步更新")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

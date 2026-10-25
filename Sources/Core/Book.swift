@@ -11,8 +11,18 @@ final class TextBook {
     let units: [UInt16]
     private(set) var chapters: [Chapter]
 
+    /// 章节表版本号：每重新解析一次 +1。
+    /// 自检用它断言「改显示设置（字号 / 行距……）不该重新解析全书章节」。
+    private(set) var chapterParseGeneration = 0
+
     var chapterRule = ChapterRule() {
-        didSet { chapters = ChapterParser.parse(units, rule: chapterRule) }
+        didSet {
+            chapters = ChapterParser.parse(units, rule: chapterRule)
+            chapterParseGeneration += 1
+            // 章节表换了一版，按章节起点缓存的集合必须同步重建，
+            // 否则「章前分页」会拿旧章节表判断，表现成分页错位。
+            chapterStartSet = Set(chapters.map { $0.index })
+        }
     }
 
     init(fileURL: URL, rawText: String, encodingName: String) {
@@ -22,6 +32,17 @@ final class TextBook {
         // 对应 Book::DecodeText 末尾必定调用的 FormatText
         self.units = TextNormalizer.format(Array(rawText.utf16))
         self.chapters = ChapterParser.parse(self.units, rule: ChapterRule())
+        self.chapterParseGeneration = 1
+    }
+
+    /// 只在规则真的变化时才重新解析章节。
+    ///
+    /// 设置窗口的滑块是连续触发的（`isContinuous = true`），每拖一下都会
+    /// 走 `applySettingsToReader()`。如果这里无条件解析全书，几 MB 的长篇小说
+    /// 每动一下滑块就要卡 1 秒多（实测 6.4M 个 UTF-16 码元约 1.3s）。
+    func applyChapterRule(_ rule: ChapterRule) {
+        guard chapterRule != rule else { return }
+        chapterRule = rule
     }
 
     var displayName: String { fileURL.deletingPathExtension().lastPathComponent }

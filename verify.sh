@@ -65,12 +65,33 @@ if [ "$OPEN_CODE" -ne 0 ] || [ "$AFTER_CRASH" -gt "$BEFORE_CRASH" ]; then
 fi
 grep -E "✅" "$OUT/earlyopen.log" | sed 's/^/  /'
 
+step "4.7/5 目录菜单自检（一级菜单 + 3000 章全部列出 + 当前章定位 + 跳转）"
+set +e
+"$BIN" --toc-selftest >"$OUT/toc.log" 2>&1
+TOC_CODE=$?
+set -e
+grep -E "一级菜单|重建|✅|❌" "$OUT/toc.log" | sed 's/^/  /'
+if [ "$TOC_CODE" -ne 0 ]; then
+    echo "  ❌ 目录自检失败（退出码 $TOC_CODE）"; cat "$OUT/toc.log"; exit 1
+fi
+
+step "4.8/5 章节搜索自检（章节号 / 中文数字 / 标题模糊 + 跳转）"
+set +e
+"$BIN" --chapter-search-selftest >"$OUT/search.log" 2>&1
+SEARCH_CODE=$?
+set -e
+grep -E "✅|❌|跳转后" "$OUT/search.log" | sed 's/^/  /'
+if [ "$SEARCH_CODE" -ne 0 ]; then
+    echo "  ❌ 章节搜索自检失败（退出码 $SEARCH_CODE）"; cat "$OUT/search.log"; exit 1
+fi
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
 "$BIN" --render-library "$OUT/library.png" 2>&1 | tail -1
 "$BIN" --render-settings "$OUT/settings.png" 2>&1 | tail -1
 "$BIN" --render-bookmarks "$OUT/bookmarks.png" 2>&1 | tail -1
+"$BIN" --render-chapter-search "$OUT/chapter-search.png" 2>&1 | tail -1
 "$BIN" --dump-pages "$ROOT/samples/古文观止.txt" 2>&1 >"$OUT/pages.tsv" | tail -1
 
 echo

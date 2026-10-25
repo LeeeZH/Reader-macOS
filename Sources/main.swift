@@ -5,8 +5,10 @@ import AppKit
 do {
     let devFlags: Set<String> = [
         "--render-page", "--render-library", "--render-settings", "--render-bookmarks",
+        "--render-chapter-search",
         "--dump-pages", "--library-selftest", "--dump-touchbar",
         "--close-selftest", "--quit-selftest", "--early-open-selftest",
+        "--toc-selftest", "--chapter-search-selftest",
     ]
     if CommandLine.arguments.contains(where: { devFlags.contains($0) }) {
         let dir = NSTemporaryDirectory() + "reader-devtools-\(ProcessInfo.processInfo.processIdentifier)"
@@ -175,6 +177,47 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-bookmarks"),
     do {
         try png.write(to: URL(fileURLWithPath: dst))
         FileHandle.standardError.write("已渲染书签面板 → \(dst)\n".data(using: .utf8)!)
+        exit(0)
+    } catch { exit(1) }
+}
+
+// ── 开发者工具：把「跳转到章节」搜索面板离屏渲染成 PNG ──
+// 用法： Reader --render-chapter-search <out.png> [查询词]
+// 查询词省略时渲染「空查询 = 全书目录」的状态。
+if let idx = CommandLine.arguments.firstIndex(of: "--render-chapter-search"),
+   CommandLine.arguments.count > idx + 1 {
+    let dst = CommandLine.arguments[idx + 1]
+    let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("reader-search-render-\(ProcessInfo.processInfo.processIdentifier)")
+    try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+    // 造一本 1200 章的书，渲染出来的才是「长篇搜索」的真实样子
+    var text = ""
+    for i in 1...1200 {
+        if i == 122 {
+            text += "第一百二十二章 山门旧事\n\n这是第122章的正文。\n\n"
+        } else {
+            text += "第\(i)章 测试章节\(i)\n\n这是第\(i)章的正文。\n\n"
+        }
+    }
+    let bookURL = tmpDir.appendingPathComponent("渲染用长篇.txt")
+    try? text.write(to: bookURL, atomically: true, encoding: .utf8)
+    let wc = ChapterSearchWindowController()
+    let data = try? Data(contentsOf: bookURL)
+    let decoded = data.flatMap { try? TextDecoder.decode($0) }
+    let book = decoded.map {
+        TextBook(fileURL: bookURL, rawText: $0.text, encodingName: $0.encodingName)
+    }
+    wc.show(book: book, currentOffset: 0)
+    if CommandLine.arguments.count > idx + 2 {
+        wc.debugSetQuery(CommandLine.arguments[idx + 2])
+    }
+    guard let view = wc.window.contentView,
+          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(2) }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let png = rep.representation(using: .png, properties: [:]) else { exit(3) }
+    do {
+        try png.write(to: URL(fileURLWithPath: dst))
+        FileHandle.standardError.write("已渲染章节搜索面板 → \(dst)\n".data(using: .utf8)!)
         exit(0)
     } catch { exit(1) }
 }
@@ -571,6 +614,309 @@ let earlyOpenSelftest = CommandLine.arguments.contains("--early-open-selftest")
 let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
+
+// ── 开发者工具：目录菜单自检（一级菜单 + 长篇小说全部章节 + 当前章定位 + 跳转）──
+// 旧版目录只列前 300 章，几千章的小说从第 301 章起点不到。
+// 这里造一本 3000 章的书（真实网文常见量级），走真实启动路径验五件事：
+//   1.「目录」是菜单栏一级菜单，且已从「阅读」里移出
+//   2. 目录列满全部章节（含第 301 章、最后一章），不再有「只列前 300」提示
+//   3. 打开目录时从当前章开始列，前面的章节收进顶部子菜单
+//   4. 当前章打勾；点当前章 / 最后一章都能真的跳过去
+//   5. 重建菜单的耗时（防止以后改回同步/多次重建，变成卡顿）
+if CommandLine.arguments.contains("--toc-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+
+    let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("reader-toc-self-\(ProcessInfo.processInfo.processIdentifier)")
+    try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+    // 造一本 3000 章的书（默认章节规则能识别「第 N 章」）
+    let chapterCount = 3000
+    var text = ""
+    for i in 1...chapterCount {
+        text += "第\(i)章 测试章节\(i)\n\n这是第\(i)章的正文，用来占位。\n\n"
+    }
+    let bookURL = tmpDir.appendingPathComponent("长篇小说.txt")
+    do {
+        try text.write(to: bookURL, atomically: true, encoding: .utf8)
+    } catch {
+        log("❌ 造测试文件失败: \(error)")
+        exit(1)
+    }
+
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+
+    // 还没打开书时也要有占位项，否则空子菜单会让「目录」变灰、点不开
+    let beforeOpen = delegate.debugTOCMenuTitles
+    check(beforeOpen.first == "跳转到章节…", "目录顶部有「跳转到章节…」入口",
+          beforeOpen.joined(separator: " / "))
+    check(beforeOpen.contains("（未打开文件）"), "没打开书时目录是占位项（菜单不会变灰）",
+          beforeOpen.joined(separator: " / "))
+    if let searchItem = delegate.debugTOCMenuItem(at: 0) {
+        check(searchItem.keyEquivalent == "j", "「跳转到章节…」快捷键是 ⌘J")
+        check(searchItem.target === delegate, "「跳转到章节…」target 指向 AppDelegate")
+        check(!delegate.validateMenuItem(searchItem), "没打开书时「跳转到章节…」是禁用的")
+    } else {
+        check(false, "能取到「跳转到章节…」菜单项")
+    }
+
+    delegate.open(url: bookURL)
+    log("打开测试书: \(bookURL.lastPathComponent)（\(chapterCount) 章）")
+
+    let topLevel = delegate.debugTopLevelMenuTitles.filter { !$0.isEmpty }
+    log("菜单栏一级菜单: \(topLevel.joined(separator: " / "))")
+    let tocPos = topLevel.firstIndex(of: "目录")
+    check(tocPos != nil, "「目录」在菜单栏一级")
+    if let tocPos, let readPos = topLevel.firstIndex(of: "阅读") {
+        check(tocPos == readPos + 1, "「目录」紧跟在「阅读」后面")
+    }
+
+    let readTitles = delegate.debugReadMenuTitles
+    check(!readTitles.contains("目录"), "「阅读」里不再重复放目录",
+          readTitles.joined(separator: " / "))
+
+    // ---- 当前在第 1 章：整本平铺（没有「前面的章节」子菜单） ----
+    // 菜单结构：[0] 跳转到章节…、[1] 分隔线、[2...] 章节
+    let startTitles = delegate.debugTOCMenuTitles
+    check(startTitles.count == chapterCount + 2, "目录列出了全部章节",
+          "实际 \(startTitles.count) 项（含 2 项固定入口）")
+    check(startTitles[2].hasPrefix("1. "), "第 1 章在平铺段最前面", startTitles[2])
+    check(!startTitles.contains { $0.contains("前面的章节") },
+          "第 1 章时没有「前面的章节」子菜单")
+    check(!startTitles.contains { $0.contains("只列前") }, "没有「此处只列前 300」的说明项")
+    if let searchItem = delegate.debugTOCMenuItem(at: 0) {
+        check(delegate.validateMenuItem(searchItem), "打开书后「跳转到章节…」可用")
+    }
+
+    if let first = delegate.debugTOCMenuItem(at: 2) {
+        check(first.state == .on, "当前章（第 1 章）打勾")
+    } else {
+        check(false, "能取到第 1 章菜单项")
+    }
+
+    // 解析同一本书拿到准确偏移（用于跳转断言）
+    guard let data = try? Data(contentsOf: bookURL),
+          let decoded = try? TextDecoder.decode(data) else {
+        log("❌ 重新解析测试书失败")
+        exit(1)
+    }
+    let book = TextBook(fileURL: bookURL, rawText: decoded.text, encodingName: decoded.encodingName)
+    let lastIndex = book.chapters.count - 1
+    let middleIndex = 1499        // 第 1500 章
+
+    // ---- 跳到第 1500 章，再打开目录：应该从当前章开始列 ----
+    // 此时菜单结构：[0] 跳转、[1] 分隔线、[2] 前面的章节、[3] 分隔线、[4...] 当前章及之后
+    if let item = delegate.debugTOCMenuItem(at: middleIndex + 2), let action = item.action {
+        NSApp.sendAction(action, to: item.target, from: item)
+    }
+    log("跳到第 1500 章：页首偏移=\(delegate.debugPageStart) 期望=\(book.chapters[middleIndex].index)")
+
+    let buildStart = Date()
+    let titles = delegate.debugTOCMenuTitles          // 强制按当前章重建
+    let buildMS = Date().timeIntervalSince(buildStart) * 1000
+    log(String(format: "目录菜单重建 %d 项，耗时 %.1f ms", titles.count, buildMS))
+
+    check(titles.first == "跳转到章节…", "「跳转到章节…」始终在目录最上面", titles.first ?? "无")
+    check(titles[2].contains("前面的章节"),
+          "★ 前面的章节收进子菜单，不再从第 1 章开始", titles[2])
+    check(titles.count == 4 + (chapterCount - middleIndex),
+          "平铺部分是当前章 + 后面的章节", "实际 \(titles.count) 项")
+    if titles.count > 4 {
+        check(titles[3].isEmpty, "子菜单和当前章之间有分隔线")
+        check(titles[4].hasPrefix("1500. "), "★ 分隔线后第一项就是当前章（第 1500 章）", titles[4])
+    }
+    check(titles.last?.contains("第\(chapterCount)章") == true,
+          "后面的章节一直到最后一章", titles.last ?? "无")
+    check(!titles.dropFirst(4).contains { $0.hasPrefix("1. ") }, "第 1 章不在平铺段里")
+    check(buildMS < 500, "重建 \(titles.count) 项菜单耗时可接受", String(format: "%.1f ms", buildMS))
+
+    if let earlier = delegate.debugTOCMenuItem(at: 2)?.submenu {
+        check(earlier.items.count == middleIndex, "「前面的章节」子菜单里有 \(middleIndex) 章",
+              "实际 \(earlier.items.count)")
+        check(earlier.items.first?.title.hasPrefix("\(middleIndex). ") == true,
+              "★ 子菜单第一项是当前章的前一章（由近到远）", earlier.items.first?.title ?? "无")
+        check(earlier.items.last?.title.hasPrefix("1. ") == true,
+              "子菜单最后一项是第 1 章", earlier.items.last?.title ?? "无")
+        check(earlier.items.allSatisfy { $0.tag >= 0 && $0.tag < middleIndex },
+              "子菜单里的 tag 都指向当前章之前的章节")
+    } else {
+        check(false, "能取到「前面的章节」子菜单")
+    }
+
+    if let current = delegate.debugTOCMenuItem(at: 4) {
+        check(current.tag == middleIndex && current.state == .on,
+              "★ 平铺第一项是打勾的当前章", "tag=\(current.tag)")
+    } else {
+        check(false, "能取到当前章菜单项")
+    }
+
+    // 点最后一章：走 NSApp.sendAction，和真实点菜单同一条路径
+    if let item = delegate.debugTOCMenuItem(at: titles.count - 1) {
+        check(item.tag == lastIndex, "最后一项 tag = 最后一章下标", "tag=\(item.tag)")
+        check(item.target === delegate, "菜单项 target 指向 AppDelegate")
+        if let action = item.action {
+            NSApp.sendAction(action, to: item.target, from: item)
+        }
+        let expected = book.chapters[lastIndex].index
+        log("点最后一章：页首偏移=\(delegate.debugPageStart) 期望=\(expected)")
+        check(delegate.debugPageStart == expected, "★ 点第 \(book.chapters.count) 章能跳过去")
+    } else {
+        check(false, "能取到最后一章菜单项")
+    }
+
+    // 顶部「前面的章节」子菜单里的旧章节也要能点（跳回第 100 章）
+    if let earlierMenu = delegate.debugTOCMenuItem(at: 2)?.submenu,
+       let oldItem = earlierMenu.items.first(where: { $0.tag == 99 }),
+       let action = oldItem.action {
+        let expected = book.chapters[99].index
+        NSApp.sendAction(action, to: oldItem.target, from: oldItem)
+        check(delegate.debugPageStart == expected, "★ 「前面的章节」子菜单里的第 100 章也能跳过去")
+    } else {
+        check(false, "能取到「前面的章节」子菜单里的第 100 章")
+    }
+
+    log(failures == 0 ? "✅ 目录自检全部通过" : "❌ 目录自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// ── 开发者工具：章节搜索面板自检（模糊搜索 + 跳转）──
+// 造一本 1200 章的书（其中一章用中文数字 + 可跳字的标题），验四件事：
+//   1. 五种章节号写法（阿拉伯 / 中文 / 全角 / 带「第…章」）都命中同一章
+//   2. 标题能模糊搜：按顺序跳字也能命中
+//   3. 面板打开时列出全书并选中当前章，回车能真的跳过去
+//   4. 打字过程中面板不会自己关掉（搜索框不能绑随输入触发的 action）
+if CommandLine.arguments.contains("--chapter-search-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+
+    let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("reader-search-self-\(ProcessInfo.processInfo.processIdentifier)")
+    try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+    let chapterCount = 1200
+    var text = ""
+    for i in 1...chapterCount {
+        if i == 122 {
+            text += "第一百二十二章 山门旧事\n\n这是第122章的正文。\n\n"
+        } else {
+            text += "第\(i)章 测试章节\(i)\n\n这是第\(i)章的正文。\n\n"
+        }
+    }
+    let bookURL = tmpDir.appendingPathComponent("搜索测试.txt")
+    do {
+        try text.write(to: bookURL, atomically: true, encoding: .utf8)
+    } catch {
+        log("❌ 造测试文件失败: \(error)")
+        exit(1)
+    }
+
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    delegate.open(url: bookURL)
+    log("打开测试书: \(bookURL.lastPathComponent)（\(chapterCount) 章）")
+
+    guard let data = try? Data(contentsOf: bookURL),
+          let decoded = try? TextDecoder.decode(data) else {
+        log("❌ 重新解析测试书失败")
+        exit(1)
+    }
+    let book = TextBook(fileURL: bookURL, rawText: decoded.text, encodingName: decoded.encodingName)
+    let targetOffset = book.chapters[121].index
+
+    // ---- 打开面板 ----
+    delegate.debugShowChapterSearch()
+    check(delegate.debugChapterSearchVisible, "菜单 / ⌘J 能打开搜索面板")
+    guard let wc = delegate.debugChapterSearch else {
+        log("❌ 拿不到搜索面板")
+        exit(1)
+    }
+    check(wc.debugRowCount == chapterCount, "空查询列出全书章节", "实际 \(wc.debugRowCount)")
+    check(wc.debugSelectedRow == 0, "空查询默认选中当前章（第 1 章）", "实际 \(wc.debugSelectedRow)")
+
+    // ---- 改显示设置不该重解析章节（大书拖滑块卡顿回归） ----
+    let parseGen = delegate.debugChapterParseGeneration
+    LibraryStore.shared.updateSettings { $0.lineGap += 1 }
+    delegate.debugReapplySettings()
+    check(delegate.debugChapterParseGeneration == parseGen,
+          "★ 改显示设置（行距）不重新解析章节",
+          "版本 \(parseGen) → \(delegate.debugChapterParseGeneration)")
+
+    // 改章节规则才应该重新解析；验完立刻恢复默认，后面的搜索断言才成立
+    LibraryStore.shared.updateSettings {
+        $0.chapterRule.kind = .keyword
+        $0.chapterRule.keyword = "第"
+    }
+    delegate.debugReapplySettings()
+    check(delegate.debugChapterParseGeneration == parseGen + 1,
+          "★ 改章节规则才重新解析一次",
+          "版本 \(parseGen) → \(delegate.debugChapterParseGeneration)")
+    LibraryStore.shared.updateSettings { $0.chapterRule = ChapterRule() }
+    delegate.debugReapplySettings()
+    check(delegate.debugChapterParseGeneration == parseGen + 2,
+          "切回默认规则再解析一次（恢复测试环境）",
+          "版本 \(parseGen) → \(delegate.debugChapterParseGeneration)")
+
+    // ---- 章节号：五种写法都要能搜到第 122 章 ----
+    for (query, name) in [("122", "阿拉伯数字"),
+                          ("第122章", "带第/章"),
+                          ("一百二十二", "中文数字"),
+                          ("第一百二十二章", "中文数字带第/章"),
+                          ("１２２", "全角数字")] {
+        wc.debugSetQuery(query)
+        check(wc.debugHitIndices.first == 121,
+              "搜索「\(query)」（\(name)）第一个命中第 122 章",
+              "实际 \(wc.debugHitIndices.first ?? -1)")
+    }
+
+    // ---- 标题模糊：跳字也能匹配 ----
+    wc.debugSetQuery("山门事")
+    check(wc.debugHitIndices.first == 121,
+          "★ 标题跳字查询「山门事」命中「山门旧事」",
+          "实际 \(wc.debugHitIndices.first ?? -1)")
+    wc.debugSetQuery("山门旧事")
+    check(wc.debugHitIndices.first == 121, "标题连续子串也能命中",
+          "实际 \(wc.debugHitIndices.first ?? -1)")
+    wc.debugSetQuery("找不到的标题zzz")
+    check(wc.debugRowCount == 0, "没有匹配时列表为空", "实际 \(wc.debugRowCount)")
+
+    // ---- 打字过程中面板不能自己关（回归：输入 435 时刚打完 4 就跳转关掉了） ----
+    check(!wc.debugSearchFieldHasAction,
+          "★ 搜索框没有绑定会随打字触发的 action")
+    for typed in ["4", "43", "435"] {
+        wc.debugSetQuery(typed)
+        check(wc.debugWindowVisible, "输入「\(typed)」时面板仍然打开")
+    }
+
+    // ---- 回车跳转（走真实的 delegate 回调，不是直接调内部方法） ----
+    wc.debugSetQuery("122")
+    let handled = wc.control(wc.debugSearchField, textView: NSTextView(),
+                             doCommandBy: #selector(NSResponder.insertNewline(_:)))
+    check(handled, "搜索框把回车事件消费掉（不会漏给别的控件）")
+    log("跳转后页首偏移=\(delegate.debugPageStart) 期望=\(targetOffset)")
+    check(delegate.debugPageStart == targetOffset, "★ 从搜索结果回车能跳过去")
+    check(!delegate.debugChapterSearchVisible, "跳转后面板自动收起")
+
+    // ---- 再次打开：查询清空、选中当前章（第 122 章） ----
+    delegate.debugShowChapterSearch()
+    check(wc.debugRowCount == chapterCount, "重新打开时查询已清空", "实际 \(wc.debugRowCount)")
+    check(wc.debugSelectedRow == 121, "重新打开时选中当前章（第 122 章）",
+          "实际 \(wc.debugSelectedRow)")
+
+    log(failures == 0 ? "✅ 章节搜索自检全部通过" : "❌ 章节搜索自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
 
 if earlyOpenSelftest {
     let cwd = FileManager.default.currentDirectoryPath

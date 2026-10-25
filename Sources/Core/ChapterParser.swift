@@ -14,7 +14,7 @@ enum ChapterRuleKind: Int {
     case regex = 2
 }
 
-struct ChapterRule {
+struct ChapterRule: Equatable {
     var kind: ChapterRuleKind = .default
     var keyword: String = ""
     var regex: String = ""

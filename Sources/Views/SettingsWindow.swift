@@ -38,6 +38,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var lineGapSlider: NSSlider!
     private var paraGapSlider: NSSlider!
     private var insetSliders: [NSSlider] = []
+    /// 滑块右侧的数值标签（字距 / 行距 / 段距 / 翻页重叠）。
+    /// 之前这些标签是 `addSliderRow` 里的局部变量，创建后没人再更新，
+    /// 于是拖滑块时阅读界面变了、数字却一直停在初始值。
+    private var sliderValueLabels: [NSSlider: NSTextField] = [:]
     private var indentCheck: NSButton!
     private var blankCheck: NSButton!
     private var wrapCheck: NSButton!
@@ -225,6 +229,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         v.textColor = .secondaryLabelColor
         v.widthAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
         grid.addRow(with: [label(title), s, v])
+        sliderValueLabels[s] = v
         return s
     }
 
@@ -524,6 +529,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         wheelPopup.selectItem(at: min(3, max(0, s.wheelSpeed)))
         smoothCheck.state = s.smoothScroll ? .on : .off
         overlapSlider.doubleValue = Double(s.leftLineCount)
+        updateSliderValueLabels()
 
         rulePopup.selectItem(at: min(2, max(0, s.chapterRule.kind.rawValue)))
         keywordField.stringValue = s.chapterRule.keyword
@@ -577,6 +583,30 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let pct = Int(alphaSlider.doubleValue.rounded())
         alphaLabel.stringValue = "\(pct)%"
         apply { $0.alpha = min(255, max(0, Int(round(Double(pct) * 255.0 / 100.0)))) }
+    }
+
+    /// 让滑块右侧的数字跟着滑块走（取整后显示）。
+    /// 拖动是连续的，所以这个函数会被高频调用；只改 4 个 NSTextField，开销可以忽略。
+    private func updateSliderValueLabels() {
+        for (slider, label) in sliderValueLabels {
+            label.stringValue = "\(Int(slider.doubleValue.rounded()))"
+        }
+    }
+
+    /// 自检用：字距 / 行距 / 段距 / 翻页重叠 四个滑块右侧显示的数字
+    var debugSpacingLabelValues: [String] {
+        [charGapSlider, lineGapSlider, paraGapSlider, overlapSlider].compactMap {
+            sliderValueLabels[$0]?.stringValue
+        }
+    }
+
+    /// 自检用：模拟拖动四个间距滑块（走和真实拖动同一条刷新路径）
+    func debugSetSpacing(charGap: Int, lineGap: Int, paraGap: Int, overlap: Int) {
+        charGapSlider.doubleValue = Double(charGap)
+        lineGapSlider.doubleValue = Double(lineGap)
+        paraGapSlider.doubleValue = Double(paraGap)
+        overlapSlider.doubleValue = Double(overlap)
+        spacingChanged()
     }
 
     /// 自动翻页的开关状态刷新（到书末自动停下时也要能把勾去掉）
@@ -668,6 +698,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let pg = Int(paraGapSlider.doubleValue.rounded())
         let insets = insetSliders.map { Int($0.doubleValue.rounded()) }
         let overlap = Int(overlapSlider.doubleValue.rounded())
+        updateSliderValueLabels()
         apply {
             $0.charGap = cg
             $0.lineGap = lg

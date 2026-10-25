@@ -65,6 +65,7 @@ B=./dist/Reader.app/Contents/MacOS/Reader
 $B --render-library   /tmp/library.png      # 阅读列表
 $B --render-settings  /tmp/settings.png     # 显示设置
 $B --render-bookmarks /tmp/bookmarks.png    # 书签面板
+$B --render-chapter-search /tmp/search.png       # 章节搜索面板（第二个参数是查询词，可省略）
 $B --dark --render-page 书.txt /tmp/dark.png 0   # 深色模式预览
 $B --render-page 书.txt /tmp/mid.png 0 220       # 第 5 个参数 = 平滑滚动像素偏移
                                                   # （用来检查下一页有没有严丝合缝接上）
@@ -95,10 +96,37 @@ $B --close-selftest samples/古文观止.txt
 > `applicationDidFinishLaunching` 复现不出来 —— 自动终止是靠
 > `_scheduleCheckForTerminateAfterLastWindowClosed` 这个 run loop 定时器触发的。
 
+**目录菜单自检**（长篇小说章节不能截断）：
+
+```bash
+$B --toc-selftest
+# 造一本 3000 章的书，验「目录」是菜单栏一级菜单、列出全部章节、
+# 打开时从当前章开始（前面的章节在顶部子菜单）、当前章打勾、
+# 点当前章 / 最后一章能真的跳过去。退出码 0 表示全部通过。
+```
+
+> 背景：早期版本目录只列前 300 章，几千章的小说从第 301 章起在菜单里
+> 根本点不到；后来虽然列全了，但每次点开都从第 1 章开始，读了两千章的人
+> 还得滚半天。现在菜单在 `menuNeedsUpdate` 里按需重建（开书 / 改设置时
+> 不建，点开「目录」才建），平铺部分从当前章开始，前面的章节倒序收在
+> 顶部子菜单 —— 3000 章的书打开目录第一眼就是当前章，重建约 6ms。
+
+**章节搜索自检**（章节号 / 中文数字 / 标题模糊）：
+
+```bash
+$B --chapter-search-selftest
+# 造一本 1200 章的书（其中一章用中文数字 + 可跳字的普通标题），验：
+#   · 阿拉伯数字 / 中文数字 / 全角数字 / 带「第…章」等写法都命中同一章
+#   · 标题按顺序跳字也能模糊命中
+#   · 空查询列出全书并选中当前章，回车跳转、面板自动收起
+#   · 打字过程中面板不会自己关掉（搜索框不能绑随输入触发的 action）
+# 退出码 0 表示全部通过。
+```
+
 **一键验证**（改动完跑一遍）：
 
 ```bash
-./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 离屏渲染
+./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 离屏渲染
 ```
 
 ### VSCode
@@ -149,7 +177,8 @@ $B --close-selftest samples/古文观止.txt
 - [x] **平滑滚动**（默认开启）：按像素连续滚动 + 缓出动画，触控板直接用系统像素增量（含惯性），鼠标一格换算成固定距离
 - [x] **逐行滚动**：`↑` `↓`，滚动量可设 1/2/3 行或整页（关掉平滑滚动后恢复原版的跳行手感）
 - [x] **英文单词换行（Word wrap）**、**章前分页**、**翻页保留重叠行数**
-- [x] 章节跳转：`⌘↑` 上一章 / `⌘↓` 下一章 / `阅读 → 目录`
+- [x] 章节跳转：`⌘↑` 上一章 / `⌘↓` 下一章 / 菜单栏一级「目录」（列出全书章节，不设上限；打开时从当前章开始，前面的章节倒序收在顶部子菜单；当前章打勾，按需重建）
+- [x] **章节搜索** `⌘J`：章节号（阿拉伯数字 / 中文数字 / 全角数字）和标题模糊匹配（按顺序跳字即可）；空查询列出全书并选中当前章，回车跳转；面板独立、不会在打字时误关
 - [x] **设置窗口** `⌘,`：分 5 个标签页 —— **显示 / 翻页 / 窗口 / 章节 / 其他**，改动即时生效并保存
 - [x] **鼠标按键逐键可配**：左键 / 右键各选「下一页 · 上一页 · 隐藏窗口 · 不动作」，左右一起按选「隐藏窗口 · 最小化窗口 · 不动作」。默认 左=下一页、右=上一页、双键=隐藏窗口
 - [x] **深色模式**：默认跟随系统外观；一旦自定义颜色就自动改用自定义值
@@ -215,12 +244,15 @@ Reader/
     │   ├── TextDecoder.swift 编码识别
     │   ├── TextNormalizer.swift  FormatText / GetLine  ← 兼容性关键
     │   ├── ChapterParser.swift   三种章节解析模式
+    │   ├── ChapterSearch.swift   章节搜索（数字 / 中文数字 / 标题模糊）
     │   └── Book.swift        TXT 书籍模型
     ├── Layout/               排版计算
     │   ├── TextMetrics.swift 字体度量 + advance 缓存
     │   └── PageModel.swift   页/行/字符数据模型
     └── Views/
-        └── ReadingView.swift 自绘阅读视图 + 分页
+        ├── ReadingView.swift 自绘阅读视图 + 分页
+        ├── TOCMenuContent.swift 目录菜单内容（全部章节 + 当前章定位）
+        └── ChapterSearchWindow.swift 章节搜索面板（⌘J）
 ```
 
 ---
@@ -410,6 +442,8 @@ READER_CACHE_PATH=/任意/位置/cache.dat ./run.sh
 | 平滑滚动方向反了（内容往下推、顶部留白） | AppKit 的 y 轴向上，内容要「往上滚出屏幕」必须让 y **变大**，写成 `top - scrollOffset` 正好相反 |
 | qlmanage 渲染的 SVG 量不出图案 | `qlmanage -t` 输出的是**不透明白底**。改用 `NSImage` 直接矢量光栅化（保留透明度） |
 | 设置界面底部被截断 | 窗口高度写死；改为按 `grid.fittingSize` 自适应 |
+| 拖字距 / 行距 / 段距滑块时正文变了，设置里的数字不变 | `addSliderRow` 创建的数值标签是**局部变量**：`spacingChanged` 只把值写进设置并重排阅读界面，没有任何人再去更新那几个 `NSTextField`。修复：用 `sliderValueLabels` 登记滑块和标签，拖动时统一刷新；`syncFromSettings` 里也刷一次（否则重开设置窗口显示的还是初始值） |
+| 设置窗口里每一项改起来都很卡，长篇小说尤其明显 | 设置里的滑块是 `isContinuous`，每拖一下都会走 `applySettingsToReader()`，而它**无条件**执行 `book.chapterRule = s.chapterRule` —— `chapterRule` 的 `didSet` 会把全书章节重新解析一遍。6.4M 个 UTF-16 码元实测约 **1.3 秒/次**，所以拖字号、行距全在等解析。修复：`ChapterRule` 改为 `Equatable`，`TextBook.applyChapterRule()` 只在规则真的变化时才重解析；打开书时也跳过与默认值相同的重复解析 |
 
 ---
 
