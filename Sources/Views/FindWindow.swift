@@ -391,6 +391,10 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         onClose?()
     }
 
+    private func shortcutText(_ action: ShortcutAction) -> String {
+        LibraryStore.shared.settings.shortcut(action)?.symbols ?? "未设置"
+    }
+
     private func updateButtonsAndHint() {
         let hasHits = !results.hits.isEmpty
         jumpButton.isEnabled = hasHits
@@ -399,7 +403,7 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         let row = tableView.selectedRow
 
         guard let book else {
-            hintLabel.stringValue = "还没有打开书 —— 用 ⌘O 打开一本 TXT 再查找"
+            hintLabel.stringValue = "还没有打开书 —— 用 \(shortcutText(.openFile)) 打开一本 TXT 再查找"
             return
         }
         if isSearching {

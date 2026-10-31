@@ -155,6 +155,16 @@ if [ "$BG_CODE" -ne 0 ]; then
 fi
 echo "  ✅ 三种铺法出图正常；文件缺失回落纯色且不崩"
 
+step "4.14/5 快捷键自检（菜单键位 / 录制 / 冲突交换 / 还原 / 文案全称）"
+set +e
+"$BIN" --shortcut-selftest >"$OUT/shortcut.log" 2>&1
+SHORTCUT_CODE=$?
+set -e
+grep -E "✅|❌" "$OUT/shortcut.log" | sed 's/^/  /'
+if [ "$SHORTCUT_CODE" -ne 0 ]; then
+    echo "  ❌ 快捷键自检失败（退出码 $SHORTCUT_CODE）"; cat "$OUT/shortcut.log"; exit 1
+fi
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1

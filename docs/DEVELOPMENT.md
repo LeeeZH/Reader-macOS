@@ -162,10 +162,22 @@ $B --always-on-top-selftest
 # 退出码 0 表示全部通过。
 ```
 
+**快捷键自检**（菜单键位 / 就地录制 / 冲突交换 / 还原 / 文案全称）：
+
+```bash
+$B --shortcut-selftest
+# 验：每个功能都在菜单里、默认显示全称且不带 ⌘ 图标、默认键位互不冲突、
+#     添加书签默认 command + D 且最小化仍是 command + M、
+#     改设置后菜单立刻跟着变（改一个不影响别的）、清除绑定后菜单无键位、
+#     单个 / 全部还原、写盘后重新加载仍生效、
+#     设置页录制落盘、冲突弹内联提示并指出对家、交换后两边都正确、还原后界面同步。
+# 退出码 0 表示全部通过。
+```
+
 **一键验证**（**打包 / 发版前**跑一遍）：
 
 ```bash
-./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 窗口置顶自检 → 章节/分页 golden 比对 → 背景图渲染 → 离屏渲染
+./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 窗口置顶自检 → 章节/分页 golden 比对 → 背景图渲染 → 快捷键自检 → 离屏渲染
 ```
 
 > ⏱️ **不要每改一行就全量跑。** `verify.sh` 要构建 + 起 7 个自检进程 + 渲染十几张图，
@@ -235,6 +247,7 @@ $B --always-on-top-selftest
 - [x] **书签面板** `⌘B`：列出当前书的书签（章节名 + 位置），可跳转 / 删除 / 全部清除
 - [x] **窗口透明**：背景可调不透明度（10%~100%），**文字始终不透明**（比原版连字一起透明更易读）
 - [x] **章节标题独立字体 / 颜色**（原版 `use_same_font` / `font_title` / `font_color_title`）：关掉「与正文同字体」后标题段落用自己的字体、字号、颜色（含折行续行）；默认同字体同色，分页基准不变。设置 → 显示 → 章节标题
+- [x] **快捷键自定义**（设置 → 快捷键）：21 个菜单功能可改键位；点一下就地录制，Esc 取消、Delete 清除；与已有键位冲突时内联提示「与某某冲突」+ 交换 / 取消；每行单独还原 + 全部还原；快捷键页显示全称（`command + F`），其他界面显示图标（`⌘F`）。存自定义键 `macos_shortcuts`（只存覆盖项），菜单 / 状态栏 / 各窗口提示都实时取当前键位
 - [x] **背景图片**（原版 `bg_image.enable / mode / file_name`）：拉伸铺满 / 平铺 / 平铺翻转（镜像棋盘）；纯色打底、图在上、正文最后，窗口半透明时图跟着淡而文字始终不透明；铺好的整层缓存成位图（滚动不掉帧，片数上限 2000）；文件缺失回落纯色 + 设置页标红提示。设置 → 显示 → 背景图片
 - [x] **窗口置顶**：`NSWindow.level = .floating` + 失焦不隐藏（`macos_always_on_top`），浮在其它应用的普通 / 最大化窗口之上；**不进**别人的原生全屏 Space（见设计决策 9）。开关联动：菜单「视图 → 窗口置顶」（`⌃⌘T`）、菜单栏图标菜单、设置 → 窗口
 - [x] **全局热键** `⌃⌥H`：一键隐藏 / 显示窗口（对应原版 Alt+H 的「老板键」）
@@ -312,14 +325,18 @@ Reader/
     │   ├── CacheDocument.swift  `.cache.dat` 47 键 schema
     │   ├── LibraryStore.swift   存档读写 / 书架 / 进度 / 书签
     │   ├── ReaderSettings.swift 设置的「类型化视图」
+    │   ├── Shortcut.swift        快捷键组合（解析 / 显示 / 校验）
+    │   ├── ShortcutAction.swift  可自定义功能注册表（id / 默认键位）
     │   ├── ReadingStatus.swift  进度口径（唯一一处）
     │   ├── FontResolver.swift   Windows 字体回退
     │   └── WindowPlacement.swift Win32 → Cocoa 坐标换算
     ├── Layout/               排版计算
     │   ├── TextMetrics.swift 字体度量 + advance 缓存
-    │   └── PageModel.swift   页/行/字符数据模型
+    │   ├── PageModel.swift   页/行/字符数据模型
+    │   └── BackgroundImageLayout.swift 背景图铺法（拉伸 / 平铺 / 镜像棋盘）
     └── Views/
         ├── ReadingView.swift 自绘阅读视图 + 分页 + 搜索高亮
+        ├── ShortcutRecorderView.swift 快捷键录制控件（本地事件监听）
         ├── TOCMenuContent.swift 目录菜单内容（全部章节 + 当前章定位）
         ├── ChapterSearchWindow.swift 章节搜索面板（⌘J）
         ├── FindWindow.swift  全文查找面板（⌘F）
@@ -532,6 +549,29 @@ floating 窗口，所以主窗口浮起来之后，设置窗口会被自家主�
 
 ---
 
+### 11. 快捷键为什么走 `macos_shortcuts`，不复用原版 `keyset`
+
+原版 `.cache.dat` 里有一个 `keyset` 数组（18 项，`Keyset.cpp`），Windows 版就是靠它
+改键位 / 禁用键位的。Mac 版没有复用它，原因：
+
+- 原版存的是 **Win32 虚拟键码 + HOTKEYF 掩码**（`MAKEWORD(VK_LEFT, HOTKEYF_EXT)` 这种），
+  和 macOS 的 `keyEquivalent` / 修饰键不是一套东西，能对齐的只有「字母 + Ctrl」这一小块；
+- 原版那 18 项对应的是 Win32 的消息处理（`OnPageUp` / `OnSearch` …），
+  Mac 版的功能是菜单命令（还多了「查找下一个」「书签面板」「章节搜索」等原版没有的），
+  一一映射只会得到一张「改了一半、另一半不生效」的键位表。
+
+所以 Mac 专属键位存在自定义键 `macos_shortcuts`（只存覆盖项），Windows 版读到直接忽略；
+反过来 Windows 存档里没有这个键，Mac 版就全用默认 —— 迁移不丢阅读设置。
+
+另外两个刻意的设计：
+
+- **显示全称而不是 ⌘ 图标**：`command + F`。设置页是用来「认键」的，
+  图标对不熟 Mac 的人等于乱码。
+- **冲突给「交换」而不是静默拒绝**：和已有键位撞了，直接把两个功能对调最省事；
+  只提示「已被占用」会让用户自己去翻另一个功能在哪（这是快捷键录制器最常见的差评点）。
+
+---
+
 ## 数据存放位置
 
 **设置、阅读列表、进度、书签全部存在同一个文件里**，路径是运行时算出来的
@@ -634,6 +674,7 @@ READER_CACHE_PATH=/任意/位置/cache.dat ./run.sh
 | 长标题换页时，标题行突然掉回正文字体（M3 自测没抓到，code review 抓到） | 第一版把「当前段落是不是标题」写成 `var paragraphIsTitle = false`，只在**段落开头**重新判断。但原版 `is_title = IsChapter(start)`（Page.cpp:737）里的 `Book::IsChapter` 是**区间判定** `idx ∈ [ch.index, ch.index + title_len)`（Book.cpp:260-268），所以一页从长标题中间开始时（翻页 / 翻页重叠行 / 跳转到标题内偏移 / 平滑滚动的下一页），原版续行仍是标题。修复：初值改成 `book.isChapterTitle(at: 页首偏移)`。回归测试见 `[26] 26.8`（造一个跨页长标题，断言第 2 页续行样式仍是 `.title`） |
 | 存档里缺 `font_title` 时，存一次盘就把 Windows 版的字体写成空 LOGFONT | `apply` 里写的是 `if case .object(var lf) = header["font_title"] ?? .object([])`：`??` 的兜底是个**空对象**，所以缺键时它照样匹配、循环一遍什么都不改，最后把 `{}` 写进 header。`CacheCodec.decode` 不补齐缺键（只有写盘时 `normalizedHeader` 按顺序补），于是 Windows 版读到 `lfHeight` / `lfFaceName` 全为 0 的字体 → 字体没了。修复：`writeFont()` 在缺键 / 空对象时退回 `CacheSchema.defaultHeader()` 里的默认 LOGFONT，正文和标题共用这一条路径 |
 | 窗口调半透明后，有背景图时整窗看起来完全不透明 | 背景用 `ctx.setAlpha` 调淡，但 `NSImage.draw` 走 AppKit 绘制路径，**不吃 CGContext 的全局 alpha**；图按自己的状态整块不透明地盖上去，把下面淡过的纯色底也盖实了。修复：淡出显式给 `layer.draw(…, fraction: alpha)` 传值，同时把 ctx 全局 alpha 复位（否则成了 alpha²）。回归测试见 `[27] 27.8`（渲染到位图后取像素 alpha 断言 < 0.95） |
+| 快捷键录制器录不到 ⌘ 组合，按 ⌘Q 还会把 app 退掉 | 菜单的 key equivalent 在**事件分发阶段**就被 AppKit 抢先处理，`keyDown` 根本收不到 ⌘ 组合。录制期间改用 `NSEvent.addLocalMonitorForEvents` 在分发前截住事件（返回 nil 消费掉），录完再移除监听。录制器的 Esc / Delete 也在这条监听里处理 |
 
 ---
 
@@ -696,7 +737,7 @@ ICON_BG='#E4F5F0' ICON_SCALE=0.66 ./build.sh     # 换个底色 / 放大图案
 设计取舍：触控栏大约只放得下 5~6 个元素，所以长尾操作全部收进两侧的 popover，
 点开才展开；而不是平铺一长排导致被系统挤掉。
 
-对应的菜单项也补齐了：**阅读 → 添加书签** `⌘M`、**放大/缩小字号** `⌘=` / `⌘-`
+对应的菜单项也补齐了：**阅读 → 添加书签** `⌘D`、**放大/缩小字号** `⌘=` / `⌘-`
 （与原版的 `Ctrl+M` / `Ctrl+=` / `Ctrl+-` 对应）。
 
 排查工具（触控栏没法截图，靠它核对结构）：

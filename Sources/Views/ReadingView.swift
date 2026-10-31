@@ -989,7 +989,7 @@ final class ReadingView: NSView {
 
     private func notifyStatus() {
         guard let book = book else {
-            onStatusChange?("用 ⌘O 打开一个 TXT 文件")
+            onStatusChange?("用 \(settings.shortcut(.openFile)?.symbols ?? "未设置") 打开一个 TXT 文件")
             return
         }
         let total = book.totalLength

@@ -17,7 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var editorScrollView: NSScrollView?
     private var editOriginalText: String = ""
     var debugEditModeActive: Bool { editorTextView != nil }
-    private let editShortcutName = "⌘E"
+    /// 编辑模式退出提示里的快捷键：从设置里实时取，不写死
+    private var editShortcutName: String { shortcutText(.toggleEditMode) }
     /// 当前是否深色外观（编辑模式的文本框也要跟着配色）
     private var isDarkAppearance: Bool {
         (window?.effectiveAppearance ?? NSApp.effectiveAppearance)
@@ -194,11 +195,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 对应原版 `OnCreate` 里的 `_Cache.get_item(0)`：打开最近阅读的那本
     private func restoreLastBook() {
         guard let item = library.mostRecent else {
-            statusLabel.stringValue = "用 ⌘O 打开一个 TXT 文件"
+            statusLabel.stringValue = "用 \(shortcutText(.openFile)) 打开一个 TXT 文件"
             return
         }
         guard let url = BookPathResolver.resolve(stored: item.fileName) else {
-            statusLabel.stringValue = "上次读的《\(item.displayName)》在本机找不到（⌘L 打开阅读列表重新定位）"
+            statusLabel.stringValue = "上次读的《\(item.displayName)》在本机找不到（\(shortcutText(.showLibrary)) 打开阅读列表重新定位）"
             return
         }
         open(url: url)
@@ -528,7 +529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard readingView.book != nil else { return }
         let offset = readingView.page.start
         if library.addBookmark(offset: offset, at: 0) {
-            statusLabel.stringValue = "已加书签 · 第 \(offset) 字（⌘M 也可以）"
+            statusLabel.stringValue = "已加书签 · 第 \(offset) 字（\(shortcutText(.addBookmark)) 也可以）"
             bookmarkWindow?.reload()
         } else {
             statusLabel.stringValue = "当前位置已经有书签了"
@@ -930,7 +931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         guard let book = readingView.book else {
             NSSound.beep()
-            statusLabel.stringValue = "先打开一本书再查找（⌘O）"
+            statusLabel.stringValue = "先打开一本书再查找（\(shortcutText(.openFile))）"
             return
         }
         ensureFindWindow()
@@ -944,7 +945,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func findNext(_ sender: Any?) {
         guard let book = readingView.book else {
             NSSound.beep()
-            statusLabel.stringValue = "先打开一本书再查找（⌘O）"
+            statusLabel.stringValue = "先打开一本书再查找（\(shortcutText(.openFile))）"
             return
         }
         ensureFindWindow()
@@ -961,7 +962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func findPrevious(_ sender: Any?) {
         guard let book = readingView.book else {
             NSSound.beep()
-            statusLabel.stringValue = "先打开一本书再查找（⌘O）"
+            statusLabel.stringValue = "先打开一本书再查找（\(shortcutText(.openFile))）"
             return
         }
         ensureFindWindow()
@@ -988,7 +989,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let total = self.findWindow?.hitCount ?? 0
             if total > 0 {
                 self.statusLabel.stringValue =
-                    "第 \(max(0, hitIndex) + 1) / \(total) 处（⌘G 下一个，⇧⌘G 上一个）"
+                    "第 \(max(0, hitIndex) + 1) / \(total) 处（\(shortcutText(.findNext)) 下一个，\(shortcutText(.findPrevious)) 上一个）"
             }
         }
         wc.onHighlight = { [weak self] hits, current in
@@ -1142,6 +1143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         readingView.settings = s
         syncKeepOnTopMenuState()
+        // 快捷键可能被改过：菜单键位 + 所有展示快捷键的文案都要立刻刷新
+        applyShortcuts()
+        settingsWindow?.refreshShortcutState()
     }
 
     // MARK: - 窗口尺寸记忆
@@ -1203,7 +1207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             NSWorkspace.shared.open(dir)
         }
-        statusLabel.stringValue = "存档位置：\(url.path)（已按 ⌘⇧. 可显示隐藏文件）"
+        statusLabel.stringValue = "存档位置：\(url.path)（按 command + shift + . 可显示隐藏文件）"
     }
 
     /// 导出存档，用于带回到 Windows 版 Reader（放到它 exe 同目录即可）
@@ -1305,6 +1309,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private var tocMenu: NSMenu?
 
+    /// 菜单项按 `ShortcutAction` 注册：启动和每次设置变化后统一从
+    /// `ReaderSettings.shortcut(_:)` 灌键位 —— 菜单里不再写死任何快捷键。
+    private var shortcutItems: [ShortcutAction: NSMenuItem] = [:]
+
+    @discardableResult
+    private func shortcutMenuItem(_ action: ShortcutAction, _ selector: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: action.menuTitle, action: selector, keyEquivalent: "")
+        // 全屏走响应链（NSWindow.toggleFullScreen），target 不能绑到 AppDelegate
+        item.target = (action == .fullScreen) ? nil : self
+        shortcutItems[action] = item
+        return item
+    }
+
+    /// 把当前设置里的快捷键灌进菜单。启动时一次，之后每次设置变化都调用。
+    func applyShortcuts() {
+        for (action, item) in shortcutItems {
+            applyShortcut(item, for: action)
+        }
+        NSApp.mainMenu?.update()
+    }
+
+    private func applyShortcut(_ item: NSMenuItem, for action: ShortcutAction) {
+        if let combo = library.settings.shortcut(action) {
+            item.keyEquivalent = combo.menuKeyEquivalent
+            item.keyEquivalentModifierMask = combo.menuModifierMask
+        } else {
+            // 用户清掉了绑定：菜单上不显示快捷键
+            item.keyEquivalent = ""
+            item.keyEquivalentModifierMask = []
+        }
+    }
+
+    /// 状态栏 / 提示文案里的快捷键（紧凑图标风格，例如 "⌘F"，和菜单栏一致）。
+    /// 不允许在文案里写死 —— 用户改了键位，这里必须立刻跟着变。
+    ///
+    /// 快捷键设置页例外：那一页要的是全称（`command + F`），走 `KeyCombo.display`。
+    private func shortcutText(_ action: ShortcutAction) -> String {
+        library.settings.shortcut(action)?.symbols ?? "未设置"
+    }
+
     private func buildMenu() {
         let main = NSMenu()
 
@@ -1316,9 +1360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         aboutItem.target = self
         appMenu.addItem(aboutItem)
         appMenu.addItem(.separator())
-        let settingsItem = NSMenuItem(title: "显示设置…", action: #selector(showSettings(_:)), keyEquivalent: ",")
-        settingsItem.target = self
-        appMenu.addItem(settingsItem)
+        appMenu.addItem(shortcutMenuItem(.appSettings, #selector(showSettings(_:))))
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "隐藏 Reader", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -1330,20 +1372,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         main.addItem(fileItem)
         let fileMenu = NSMenu(title: "文件")
 
-        let openItem = NSMenuItem(title: "打开…", action: #selector(openDocument(_:)), keyEquivalent: "o")
-        openItem.target = self
-        fileMenu.addItem(openItem)
-
-        let libItem = NSMenuItem(title: "阅读列表", action: #selector(showLibrary(_:)), keyEquivalent: "l")
-        libItem.target = self
-        fileMenu.addItem(libItem)
-
+        fileMenu.addItem(shortcutMenuItem(.openFile, #selector(openDocument(_:))))
+        fileMenu.addItem(shortcutMenuItem(.showLibrary, #selector(showLibrary(_:))))
         fileMenu.addItem(.separator())
-        let revealItem = NSMenuItem(title: "在访达中显示存档",
-                                    action: #selector(revealArchive(_:)), keyEquivalent: "s")
-        revealItem.keyEquivalentModifierMask = [.command, .shift]
-        revealItem.target = self
-        fileMenu.addItem(revealItem)
+        fileMenu.addItem(shortcutMenuItem(.revealArchive, #selector(revealArchive(_:))))
 
         let copyPathItem = NSMenuItem(title: "复制存档路径",
                                       action: #selector(copyArchivePath(_:)), keyEquivalent: "")
@@ -1364,79 +1396,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         main.addItem(readItem)
         let readMenu = NSMenu(title: "阅读")
 
-        let prev = NSMenuItem(title: "上一页", action: #selector(prevPage(_:)), keyEquivalent: "\u{F702}")
-        prev.target = self
-        readMenu.addItem(prev)
-        let next = NSMenuItem(title: "下一页", action: #selector(nextPage(_:)), keyEquivalent: "\u{F703}")
-        next.target = self
-        readMenu.addItem(next)
+        readMenu.addItem(shortcutMenuItem(.prevPage, #selector(prevPage(_:))))
+        readMenu.addItem(shortcutMenuItem(.nextPage, #selector(nextPage(_:))))
         readMenu.addItem(.separator())
 
         // ⚠️ 原版用 Ctrl+←/→ 切章节，但 macOS 上 ⌃←/→ 已被系统占用（切换 Space），
-        //    所以改用 ⌘↑ / ⌘↓
-        let pch = NSMenuItem(title: "上一章", action: #selector(prevChapter(_:)), keyEquivalent: "\u{F700}")
-        pch.keyEquivalentModifierMask = [.command]
-        pch.target = self
-        readMenu.addItem(pch)
-        let nch = NSMenuItem(title: "下一章", action: #selector(nextChapter(_:)), keyEquivalent: "\u{F701}")
-        nch.keyEquivalentModifierMask = [.command]
-        nch.target = self
-        readMenu.addItem(nch)
+        //    所以改用 ⌘↑ / ⌘↓（键位本身可在「设置 → 快捷键」里改）
+        readMenu.addItem(shortcutMenuItem(.prevChapter, #selector(prevChapter(_:))))
+        readMenu.addItem(shortcutMenuItem(.nextChapter, #selector(nextChapter(_:))))
 
         readMenu.addItem(.separator())
-        let mark = NSMenuItem(title: "添加书签", action: #selector(menuAddBookmark(_:)), keyEquivalent: "m")
-        mark.target = self
-        readMenu.addItem(mark)
+        readMenu.addItem(shortcutMenuItem(.addBookmark, #selector(menuAddBookmark(_:))))
 
-        let hideChrome = NSMenuItem(title: "沉浸模式（隐藏顶栏和底栏）",
-                                    action: #selector(toggleHideChrome(_:)),
-                                    keyEquivalent: "B")
-        hideChrome.keyEquivalentModifierMask = [.command, .shift]
-        hideChrome.target = self
+        let hideChrome = shortcutMenuItem(.toggleHideChrome, #selector(toggleHideChrome(_:)))
         hideChromeMenuItem = hideChrome
         readMenu.addItem(hideChrome)
 
-        let editMode = NSMenuItem(title: "编辑模式", action: #selector(toggleEditMode(_:)), keyEquivalent: "e")
-        editMode.target = self
+        let editMode = shortcutMenuItem(.toggleEditMode, #selector(toggleEditMode(_:)))
         editMenuItem = editMode
         readMenu.addItem(editMode)
         readMenu.addItem(.separator())
 
-        let autoPage = NSMenuItem(title: "自动翻页", action: #selector(toggleAutoPage(_:)), keyEquivalent: "A")
-        autoPage.keyEquivalentModifierMask = [.command, .shift]
-        autoPage.target = self
+        let autoPage = shortcutMenuItem(.toggleAutoPage, #selector(toggleAutoPage(_:)))
         autoPageMenuItem = autoPage
         readMenu.addItem(autoPage)
         readMenu.addItem(.separator())
 
-        let marks = NSMenuItem(title: "书签…", action: #selector(showBookmarks(_:)), keyEquivalent: "b")
-        marks.target = self
-        readMenu.addItem(marks)
+        readMenu.addItem(shortcutMenuItem(.showBookmarks, #selector(showBookmarks(_:))))
         readMenu.addItem(.separator())
 
-        // 全文搜索：⌘F 是 macOS 上「查找」的约定键位，全屏让给 ⌃⌘F
-        // （系统自带的「进入全屏幕」也是 ⌃⌘F，肌肉记忆一致）。
-        // 老版本把 ⌘F 用作全屏，README 里还专门为这件事写了道歉 —— 这次一并修掉。
-        let find = NSMenuItem(title: "查找…", action: #selector(showFind(_:)), keyEquivalent: "f")
-        find.target = self
-        readMenu.addItem(find)
-        let findNextItem = NSMenuItem(title: "查找下一个",
-                                      action: #selector(findNext(_:)), keyEquivalent: "g")
-        findNextItem.target = self
-        readMenu.addItem(findNextItem)
-        let findPrevItem = NSMenuItem(title: "查找上一个",
-                                      action: #selector(findPrevious(_:)), keyEquivalent: "g")
-        findPrevItem.keyEquivalentModifierMask = [.command, .shift]
-        findPrevItem.target = self
-        readMenu.addItem(findPrevItem)
+        readMenu.addItem(shortcutMenuItem(.showFind, #selector(showFind(_:))))
+        readMenu.addItem(shortcutMenuItem(.findNext, #selector(findNext(_:))))
+        readMenu.addItem(shortcutMenuItem(.findPrevious, #selector(findPrevious(_:))))
         readMenu.addItem(.separator())
 
-        let zoomIn = NSMenuItem(title: "放大字号", action: #selector(menuFontLarger(_:)), keyEquivalent: "=")
-        zoomIn.target = self
-        readMenu.addItem(zoomIn)
-        let zoomOut = NSMenuItem(title: "缩小字号", action: #selector(menuFontSmaller(_:)), keyEquivalent: "-")
-        zoomOut.target = self
-        readMenu.addItem(zoomOut)
+        readMenu.addItem(shortcutMenuItem(.fontLarger, #selector(menuFontLarger(_:))))
+        readMenu.addItem(shortcutMenuItem(.fontSmaller, #selector(menuFontSmaller(_:))))
 
         readItem.submenu = readMenu
 
@@ -1463,23 +1458,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                    keyEquivalent: "")
         // 窗口置顶：和「设置 → 窗口」「菜单栏图标菜单」是同一个开关，
         // 三处联动，状态由 syncKeepOnTopMenuState() 统一刷新
-        let keepOnTop = NSMenuItem(title: "窗口置顶",
-                                   action: #selector(toggleKeepOnTop(_:)), keyEquivalent: "t")
-        // ⌃⌘T：T 取自 Top；和全屏的 ⌃⌘F 同一套「控制键 + 命令键」的组合
-        keepOnTop.keyEquivalentModifierMask = [.command, .control]
-        keepOnTop.target = self
+        let keepOnTop = shortcutMenuItem(.keepOnTop, #selector(toggleKeepOnTop(_:)))
         keepOnTop.state = library.settings.keepOnTop ? .on : .off
         keepOnTopMenuItem = keepOnTop
         viewMenu.addItem(keepOnTop)
         viewMenu.addItem(.separator())
         viewMenu.addItem(customize)
         viewMenu.addItem(.separator())
-        // ⌘F 已经给「查找」了（macOS 的通用约定），全屏沿用系统标准的 ⌃⌘F
-        let fullScreen = NSMenuItem(title: "进入全屏幕",
-                                    action: #selector(NSWindow.toggleFullScreen(_:)),
-                                    keyEquivalent: "f")
-        fullScreen.keyEquivalentModifierMask = [.command, .control]
-        viewMenu.addItem(fullScreen)
+        viewMenu.addItem(shortcutMenuItem(.fullScreen, #selector(NSWindow.toggleFullScreen(_:))))
         viewItem.submenu = viewMenu
 
         // --- 窗口 ---
@@ -1491,6 +1477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.windowsMenu = winMenu
 
         NSApp.mainMenu = main
+        applyShortcuts()
     }
 
     // MARK: - 目录菜单
@@ -1518,9 +1505,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         // 「跳转到章节…」固定在目录最上面：几千章的书，输入比滚动快。
         // ⌘J 也能直接呼出（菜单项在启动时就会建出来，快捷键常驻）。
-        let searchItem = NSMenuItem(title: "跳转到章节…",
-                                    action: #selector(showChapterSearch(_:)), keyEquivalent: "j")
-        searchItem.target = self
+        let searchItem = shortcutMenuItem(.jumpToChapter, #selector(showChapterSearch(_:)))
+        applyShortcut(searchItem, for: .jumpToChapter)
         tocMenu.addItem(searchItem)
         tocMenu.addItem(.separator())
 
@@ -1673,6 +1659,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var debugVisibleSearchRanges: [Range<Int>] { readingView?.debugVisibleSearchRanges ?? [] }
 
     /// 自检用：某个菜单项实际生效的快捷键（含修饰键，如 "⌃⌘f"）
+    // MARK: - 快捷键自检探针
+
+    /// 自检用：某个功能当前在菜单上的 keyEquivalent
+    func debugMenuKeyEquivalent(_ action: ShortcutAction) -> String? {
+        shortcutItems[action]?.keyEquivalent
+    }
+
+    /// 自检用：某个功能当前在菜单上的修饰键
+    func debugMenuModifiers(_ action: ShortcutAction) -> NSEvent.ModifierFlags? {
+        shortcutItems[action]?.keyEquivalentModifierMask
+    }
+
+    /// 自检用：某个功能在菜单里有没有对应项
+    func debugHasShortcutItem(_ action: ShortcutAction) -> Bool {
+        shortcutItems[action] != nil
+    }
+
+    /// 自检用：快捷键全称（设置页风格，例如 "command + F"）
+    func debugShortcutDisplay(_ action: ShortcutAction) -> String {
+        library.settings.shortcut(action)?.display ?? "未设置"
+    }
+
+    /// 自检用：状态栏 / 提示的图标风格（例如 "⌘F"）
+    func debugShortcutSymbols(_ action: ShortcutAction) -> String { shortcutText(action) }
+
+    /// 自检用：设置变化后手动重新灌一遍菜单键位
+    func debugApplyShortcuts() { applyShortcuts() }
+
+    // 设置页快捷键页探针（走真实 commit 路径）
+    func debugSettingsShortcutText(_ action: ShortcutAction) -> String {
+        settingsWindow?.debugShortcutText(action) ?? ""
+    }
+    func debugSettingsSetShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
+        settingsWindow?.debugSetShortcut(combo, for: action)
+    }
+    var debugSettingsConflictVisible: Bool { settingsWindow?.debugConflictVisible ?? false }
+    var debugSettingsPendingConflictOther: ShortcutAction? {
+        settingsWindow?.debugPendingConflictOther
+    }
+    func debugSettingsSwapConflict() { settingsWindow?.debugSwapConflict() }
+    func debugSettingsResetAllShortcuts() { settingsWindow?.debugResetAllShortcuts() }
+
     func debugShortcut(menuTitle: String, itemTitle: String) -> String? {
         guard let item = debugMenuItem(menuTitle: menuTitle, itemTitle: itemTitle) else { return nil }
         var s = ""

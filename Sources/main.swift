@@ -11,6 +11,7 @@ do {
         "--open-async-selftest", "--open-bench",
         "--toc-selftest", "--chapter-search-selftest", "--find-selftest",
         "--always-on-top-selftest",
+        "--shortcut-selftest",
     ]
     if CommandLine.arguments.contains(where: { devFlags.contains($0) }) {
         let dir = NSTemporaryDirectory() + "reader-devtools-\(ProcessInfo.processInfo.processIdentifier)"
@@ -1267,6 +1268,152 @@ if CommandLine.arguments.contains("--always-on-top-selftest") {
     check(reloaded.settings.keepOnTop, "★ 置顶开关写盘后重新加载仍然生效")
 
     log(failures == 0 ? "✅ 窗口置顶自检全部通过" : "❌ 窗口置顶自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// ── 开发者工具：快捷键自检（菜单键位 / 录制 / 冲突交换 / 还原 / 文案全称）──
+if CommandLine.arguments.contains("--shortcut-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+    func menu(_ title: String) -> NSMenu? {
+        NSApp.mainMenu?.items.first { $0.submenu?.title == title }?.submenu
+    }
+
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    let store = LibraryStore.shared
+
+    // ---- 1) 默认键位：注册表 → 菜单 → 显示全称 ----
+    for action in ShortcutAction.allCases {
+        check(delegate.debugHasShortcutItem(action), "菜单里有「\(action.title)」")
+        check(delegate.debugShortcutDisplay(action) == action.defaultCombo.display,
+              "「\(action.title)」默认显示 \(action.defaultCombo.display)",
+              delegate.debugShortcutDisplay(action))
+    }
+    check(delegate.debugShortcutDisplay(.addBookmark) == "command + D",
+          "★ 添加书签默认 command + D（不再占用最小化的 command + M）")
+    if let minimize = menu("窗口")?.items.first(where: { $0.title == "最小化" }) {
+        check(minimize.keyEquivalent == "m" && minimize.keyEquivalentModifierMask == [.command],
+              "★ 窗口 → 最小化 仍是 command + M")
+    } else {
+        check(false, "窗口菜单里能找到「最小化」")
+    }
+    var seen: [KeyCombo: ShortcutAction] = [:]
+    var conflictFree = true
+    for action in ShortcutAction.allCases {
+        guard let combo = store.settings.shortcut(action) else { continue }
+        if let other = seen[combo] {
+            conflictFree = false
+            log("     冲突：\(action.title) 与 \(other.title) 都是 \(combo.display)")
+        }
+        seen[combo] = action
+    }
+    check(conflictFree, "★ 默认键位互不冲突")
+
+    // ---- 2) 改设置 → 菜单立刻跟着变 ----
+    let customFind = KeyCombo(.character("f"), [.command, .shift])
+    store.updateSettings { $0.setShortcut(customFind, for: .showFind) }
+    delegate.debugApplyShortcuts()
+    check(delegate.debugMenuKeyEquivalent(.showFind) == "f", "自定义后菜单 keyEquivalent 正确")
+    check(delegate.debugMenuModifiers(.showFind)?.contains(.shift) == true, "自定义后菜单带上 shift")
+    check(delegate.debugShortcutDisplay(.showFind) == "shift + command + F",
+          "★ 快捷键设置页显示全称（command / shift 单词）",
+          delegate.debugShortcutDisplay(.showFind))
+    check(delegate.debugShortcutSymbols(.showFind) == "⇧⌘F",
+          "★ 其它界面（状态栏 / 提示）用图标，和菜单栏一致",
+          delegate.debugShortcutSymbols(.showFind))
+    check(delegate.debugMenuKeyEquivalent(.fullScreen) == "f"
+          && delegate.debugMenuModifiers(.fullScreen)?.contains(.control) == true,
+          "改一个功能不影响别的功能（全屏仍是 control + command + F）")
+    check(!delegate.debugShortcutDisplay(.showFind).contains("⌘"),
+          "★ 快捷键设置页的全称里没有任何修饰键图标")
+
+    // ---- 3) 冲突检测 / 清除绑定 ----
+    check(store.settings.conflictingAction(for: customFind, excluding: .findNext) == .showFind,
+          "★ 冲突检查能指出被哪个功能占用")
+    store.updateSettings { $0.setShortcut(nil, for: .showFind) }
+    delegate.debugApplyShortcuts()
+    check(delegate.debugMenuKeyEquivalent(.showFind) == "", "清除绑定后菜单没有 keyEquivalent")
+    check(delegate.debugShortcutDisplay(.showFind) == "未设置"
+          && delegate.debugShortcutSymbols(.showFind) == "未设置", "清除后两种显示都是「未设置」")
+
+    // ---- 4) 单个还原 / 全部还原 ----
+    store.updateSettings { $0.resetShortcut(.showFind) }
+    delegate.debugApplyShortcuts()
+    check(delegate.debugMenuKeyEquivalent(.showFind) == "f"
+          && delegate.debugMenuModifiers(.showFind)?.contains(.shift) != true,
+          "★ 单个还原后回到 command + F")
+    store.updateSettings {
+        $0.setShortcut(KeyCombo(.character("k"), .command), for: .addBookmark)
+        $0.setShortcut(KeyCombo(.character("1"), .command), for: .showLibrary)
+    }
+    store.updateSettings { $0.resetAllShortcuts() }
+    delegate.debugApplyShortcuts()
+    check(delegate.debugShortcutDisplay(.addBookmark) == "command + D"
+          && delegate.debugShortcutDisplay(.showLibrary) == "command + L",
+          "★ 全部还原后全部回到默认")
+
+    // ---- 5) 持久化：写盘 → 重新加载 ----
+    store.updateSettings {
+        $0.setShortcut(KeyCombo(.character("k"), [.command, .shift]), for: .addBookmark)
+    }
+    _ = store.save()
+    let reloaded = LibraryStore(fileURL: store.fileURL)
+    reloaded.load()
+    check(reloaded.settings.shortcut(.addBookmark)?.display == "shift + command + K",
+          "★ 自定义键位写盘后重新加载仍生效",
+          reloaded.settings.shortcut(.addBookmark)?.display ?? "nil")
+    check(reloaded.settings.shortcutIsOverridden(.addBookmark), "重新加载后仍标记为「改过」")
+    store.updateSettings { $0.resetAllShortcuts() }
+    _ = store.save()
+    delegate.debugApplyShortcuts()
+
+    // ---- 6) 设置页：就地录制 → 冲突（交换 / 取消）→ 还原，界面全部同步 ----
+    delegate.showSettings(nil)
+    check(delegate.debugSettingsShortcutText(.showFind) == "command + F",
+          "设置页打开时显示当前快捷键", delegate.debugSettingsShortcutText(.showFind))
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("r"), [.command, .shift]), for: .showFind)
+    check(store.settings.shortcut(.showFind)?.display == "shift + command + R",
+          "★ 设置页录制后立刻落盘")
+    check(delegate.debugSettingsShortcutText(.showFind) == "shift + command + R",
+          "设置页显示刚录的键位（全称）")
+
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("r"), [.command, .shift]), for: .findNext)
+    check(delegate.debugSettingsConflictVisible, "★ 冲突时显示内联提示（不静默拒绝）")
+    check(delegate.debugSettingsPendingConflictOther == .showFind, "提示里指出与哪个功能冲突")
+    check(store.settings.shortcut(.findNext)?.display == "command + G",
+          "冲突时先不落盘（等用户选交换或取消）")
+
+    delegate.debugSettingsSwapConflict()
+    check(store.settings.shortcut(.findNext)?.display == "shift + command + R",
+          "★ 交换后新键位给了「查找下一个」",
+          store.settings.shortcut(.findNext)?.display ?? "nil")
+    check(store.settings.shortcut(.showFind)?.display == "command + G",
+          "★ 交换后旧键位给了「查找」",
+          store.settings.shortcut(.showFind)?.display ?? "nil")
+    check(!delegate.debugSettingsConflictVisible, "交换后冲突提示消失")
+
+    delegate.debugSettingsResetAllShortcuts()
+    delegate.debugApplyShortcuts()
+    check(delegate.debugSettingsShortcutText(.showFind) == "command + F", "还原后设置页显示默认")
+    check(delegate.debugShortcutDisplay(.showFind) == "command + F", "还原后菜单也回到默认")
+
+    delegate.debugCloseAuxWindows()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+    // ---- 7) 状态栏 / 提示文案也要是新的（不能写死 ⌘X） ----
+    check(delegate.debugShortcutDisplay(.openFile) == "command + O",
+          "设置页风格仍是全称 command + O")
+    check(delegate.debugShortcutSymbols(.openFile) == "⌘O",
+          "★ 状态栏 / 提示用的是图标 ⌘O（和菜单栏一致）",
+          delegate.debugShortcutSymbols(.openFile))
+
+    log(failures == 0 ? "✅ 快捷键自检全部通过" : "❌ 快捷键自检失败 \(failures) 项")
     exit(failures == 0 ? 0 : 1)
 }
 

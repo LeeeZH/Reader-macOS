@@ -177,10 +177,14 @@ final class ChapterSearchWindowController: NSObject, NSTableViewDataSource, NSTa
         updateHint()
     }
 
+    private func shortcutText(_ action: ShortcutAction) -> String {
+        LibraryStore.shared.settings.shortcut(action)?.symbols ?? "未设置"
+    }
+
     private func updateHint() {
         jumpButton.isEnabled = !hits.isEmpty && tableView.selectedRow >= 0
         guard let book else {
-            hintLabel.stringValue = "还没有打开书 —— 用 ⌘O 打开一本 TXT 再搜索章节"
+            hintLabel.stringValue = "还没有打开书 —— 用 \(shortcutText(.openFile)) 打开一本 TXT 再搜索章节"
             return
         }
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -2039,6 +2039,107 @@ if let fadeRep = fadeView.bitmapImageRepForCachingDisplay(in: fadeView.bounds) {
     check(false, "半透明窗口背景图渲染（无法创建位图）")
 }
 
+// ============ 28. 快捷键自定义（KeyCombo / 注册表 / 存档往返） ============
+print("\n[28] 快捷键自定义")
+
+// 28.1 存盘格式往返
+let sampleCombos: [KeyCombo] = [
+    KeyCombo(.character("f"), .command),
+    KeyCombo(.character("b"), [.command, .shift]),
+    KeyCombo(.character("t"), [.command, .control]),
+    KeyCombo(.left),
+    KeyCombo(.right, .option),
+    KeyCombo(.function(5), .command),
+    KeyCombo(.space, .command),
+    KeyCombo(.character("="), .command),
+]
+for combo in sampleCombos {
+    eq(KeyCombo(stored: combo.stored), combo, "存盘往返：\(combo.stored)")
+}
+check(KeyCombo(stored: "") == nil, "空串解析为 nil（语义 = 用户清掉了绑定）")
+check(KeyCombo(stored: "command+shift+爆") == nil, "无法识别的键返回 nil")
+check(KeyCombo(stored: "f21") == nil, "F21 超出支持范围")
+
+// 28.2 显示全称（不用 ⌘ / ⇧ 图标）
+eq(KeyCombo(.character("f"), .command).display, "command + F", "显示 command + F")
+eq(KeyCombo(.character("b"), [.command, .shift]).display, "shift + command + B",
+   "多个修饰键按 control → option → shift → command 的顺序")
+eq(KeyCombo(.left).display, "←", "方向键显示箭头")
+
+// 28.2b 图标风格（菜单 / 状态栏 / 提示用；快捷键设置页不用）
+eq(KeyCombo(.character("f"), .command).symbols, "⌘F", "图标风格：⌘F")
+eq(KeyCombo(.character("b"), [.command, .shift]).symbols, "⇧⌘B", "图标风格：⇧⌘B")
+eq(KeyCombo(.character("t"), [.command, .control]).symbols, "⌃⌘T", "图标风格：⌃⌘T")
+eq(KeyCombo(.left).symbols, "←", "裸方向键图标风格是箭头")
+eq(KeyCombo(.function(5), .command).symbols, "⌘F5", "功能键图标风格：⌘F5")
+check(KeyCombo(.character("f"), .command).symbols != KeyCombo(.character("f"), .command).display,
+      "两种显示方式明确不同（全称 vs 图标）")
+check(!KeyCombo(.character("f"), .command).display.contains("⌘"),
+      "★ 显示文案里没有任何修饰键图标")
+
+// 28.3 校验：非法 / 保留键
+eq(ShortcutValidation.check(KeyCombo(.character("f"))), .needsModifier, "裸字母被拒绝")
+check(ShortcutValidation.check(KeyCombo(.left)) == nil, "裸方向键允许（默认的上一页/下一页就是）")
+check(ShortcutValidation.check(KeyCombo(.function(5), .command)) == nil, "⌘F5 允许")
+eq(ShortcutValidation.check(KeyCombo(.character("q"), .command)), .reserved("command + Q"),
+   "★ command + Q 是系统标准键，不能占用")
+eq(ShortcutValidation.check(KeyCombo(.character("w"), .command)), .reserved("command + W"),
+   "command + W 是系统标准键")
+
+// 28.4 注册表：id / 默认键位
+check(Set(ShortcutAction.allCases.map(\.rawValue)).count == ShortcutAction.allCases.count,
+      "功能 id 不重复（id 是写进存档的稳定键）")
+check(Set(ShortcutAction.allCases.map(\.defaultCombo)).count == ShortcutAction.allCases.count,
+      "★ 默认键位互不冲突")
+eq(ShortcutAction.addBookmark.defaultCombo.display, "command + D",
+   "添加书签默认 command + D（command + M 留给最小化）")
+eq(ShortcutAction.fullScreen.defaultCombo.display, "control + command + F", "全屏默认 control + command + F")
+eq(ShortcutAction.allCases.filter { $0.category == .reading }.count, 11, "「阅读」分组 11 项")
+eq(ShortcutAction.allCases.count, 21, "一共 21 个可自定义功能")
+
+// 28.5 设置读写：覆盖 / 清空 / 还原 / 冲突查询
+var scSettings = ReaderSettings()
+eq(scSettings.shortcut(.showFind)?.display, "command + F", "默认取注册表里的默认值")
+check(!scSettings.shortcutIsOverridden(.showFind), "默认不标记为「改过」")
+scSettings.setShortcut(KeyCombo(.character("k"), [.command, .shift]), for: .showFind)
+eq(scSettings.shortcut(.showFind)?.display, "shift + command + K", "覆盖后生效")
+check(scSettings.shortcutIsOverridden(.showFind), "覆盖后标记为「改过」")
+eq(scSettings.conflictingAction(for: KeyCombo(.character("b"), .command), excluding: .showFind),
+   .showBookmarks, "★ 冲突查询指出被哪个功能占用")
+check(scSettings.conflictingAction(for: KeyCombo(.character("k"), [.command, .shift]),
+                                   excluding: .showFind) == nil, "排除自己后不算冲突")
+scSettings.setShortcut(nil, for: .showFind)
+check(scSettings.shortcut(.showFind) == nil, "清空绑定 = nil（不是回默认）")
+check(scSettings.shortcut(.showFind) == nil && scSettings.shortcutIsOverridden(.showFind),
+      "清空绑定仍然算「改过」（存空串）")
+scSettings.resetShortcut(.showFind)
+eq(scSettings.shortcut(.showFind)?.display, "command + F", "单个还原回默认值")
+
+// 28.6 写进 header：只读自定义键 macos_shortcuts，不新增原版字段
+var scHeader = CacheSchema.defaultHeader()
+var scForHeader = ReaderSettings()
+scForHeader.apply(to: &scHeader)
+check(scHeader["macos_shortcuts"] == nil, "没有任何覆盖时不写 macos_shortcuts（文件不多一行）")
+scForHeader.setShortcut(KeyCombo(.character("k"), [.command, .shift]), for: .addBookmark)
+scForHeader.setShortcut(nil, for: .showLibrary)
+scForHeader.apply(to: &scHeader)
+check(scHeader["macos_shortcuts"] != nil, "有覆盖时写入 macos_shortcuts")
+eq(scHeader["macos_shortcuts"]?.field("add_bookmark")?.stringValue, "shift+command+k",
+   "覆盖项按功能 id 存成字符串")
+eq(scHeader["macos_shortcuts"]?.field("show_library")?.stringValue, "", "清空绑定存空串")
+let scReloaded = ReaderSettings(header: scHeader)
+eq(scReloaded.shortcut(.addBookmark)?.display, "shift + command + K", "重新加载后覆盖生效")
+check(scReloaded.shortcut(.showLibrary) == nil, "重新加载后清空绑定仍是 nil")
+var scAfterReset = scReloaded
+scAfterReset.resetAllShortcuts()
+eq(scAfterReset.shortcut(.addBookmark)?.display, "command + D", "全部还原后回到默认")
+
+// 28.7 原版存档里没有 macos_shortcuts → 全部用默认（Windows 存档迁移不丢键位）
+let scWindowsHeader = CacheSchema.defaultHeader()
+let scFromWindows = ReaderSettings(header: scWindowsHeader)
+check(ShortcutAction.allCases.allSatisfy { scFromWindows.shortcut($0) == $0.defaultCombo },
+      "★ Windows 存档（无自定义键）读出来全是默认键位")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

@@ -29,6 +29,13 @@ struct ReaderSettings {
     var bgImageMode: Int = 0
     var bgImageFileName: String = ""
 
+    /// 用户自定义的快捷键。原版没有对应字段（它的 `keyset` 是 Win32 的 VK 码，
+    /// 和 macOS 的菜单键位对不齐），所以走自定义键 `macos_shortcuts`，Windows 版忽略。
+    ///
+    /// 只存**覆盖项**：key = `ShortcutAction.rawValue`，value = `KeyCombo.stored`。
+    /// value 为空串表示用户主动清掉了绑定（菜单上不显示快捷键）。
+    var shortcutOverrides: [String: String] = [:]
+
     var charGap: Int = 0
     var lineGap: Int = 5
     var paragraphGap: Int = 15
@@ -155,6 +162,12 @@ struct ReaderSettings {
             bgImageEnabled = (bi.field("enable")?.intValue ?? 0) != 0
             bgImageMode = bi.field("mode")?.intValue ?? 0
             bgImageFileName = bi.field("file_name")?.stringValue ?? ""
+        }
+        // 快捷键覆盖项：缺这个键 = 全用默认；空串 = 用户清掉了绑定
+        if let sc = header["macos_shortcuts"]?.objectValue {
+            for (k, v) in sc {
+                if let raw = v.stringValue { shortcutOverrides[k] = raw }
+            }
         }
         if let r = header["internal_border"], let o = r.objectValue {
             var m: [String: Int] = [:]
@@ -303,6 +316,15 @@ struct ReaderSettings {
         set("macos_hide_chrome", .int(hideChrome ? 1 : 0))
         set("macos_find_case_sensitive", .int(findCaseSensitive ? 1 : 0))
         set("macos_always_on_top", .int(keepOnTop ? 1 : 0))
+        // 自定义快捷键：只写覆盖项，按 id 排序保证输出稳定（便于 diff / 排查）。
+        // 没有任何覆盖时不写这个键 —— 老用户 / Windows 存档的文件里不会平白多出一行。
+        if shortcutOverrides.isEmpty {
+            header.removeValue(forKey: "macos_shortcuts")
+        } else {
+            set("macos_shortcuts", .object(shortcutOverrides.keys.sorted().map {
+                ($0, .string(shortcutOverrides[$0] ?? ""))
+            }))
+        }
         // 反向推导回原版字段，保证 Windows 版读到的行为别太离谱
         let winPageMode: Int = (mouseLeftAction == .none && mouseRightAction == .none) ? 0 : 1
         set("page_mode", .int(winPageMode))
@@ -359,6 +381,41 @@ struct ReaderSettings {
     var hasUsableBackgroundImage: Bool {
         guard bgImageEnabled, !bgImageFileName.isEmpty else { return false }
         return FileManager.default.fileExists(atPath: bgImageFileName)
+    }
+
+    // MARK: - 快捷键
+
+    /// 某个功能当前生效的快捷键。`nil` = 用户把它清掉了（菜单上不显示快捷键）。
+    func shortcut(_ action: ShortcutAction) -> KeyCombo? {
+        if let raw = shortcutOverrides[action.rawValue] {
+            return KeyCombo(stored: raw)      // 空串解析失败 → nil（不绑定）
+        }
+        return action.defaultCombo
+    }
+
+    /// 这个功能是否被用户改过（设置页据此决定「还原」按钮是否可用）
+    func shortcutIsOverridden(_ action: ShortcutAction) -> Bool {
+        shortcutOverrides[action.rawValue] != nil
+    }
+
+    /// 设置快捷键。`nil` 表示清掉绑定（存空串，和「没改过」区分开）。
+    mutating func setShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
+        shortcutOverrides[action.rawValue] = combo?.stored ?? ""
+    }
+
+    /// 单个功能还原默认
+    mutating func resetShortcut(_ action: ShortcutAction) {
+        shortcutOverrides.removeValue(forKey: action.rawValue)
+    }
+
+    /// 全部还原默认
+    mutating func resetAllShortcuts() {
+        shortcutOverrides.removeAll()
+    }
+
+    /// 这个键位目前被哪个功能占着（不含自己）。冲突检查用。
+    func conflictingAction(for combo: KeyCombo, excluding action: ShortcutAction) -> ShortcutAction? {
+        ShortcutAction.allCases.first { $0 != action && shortcut($0) == combo }
     }
 }
 

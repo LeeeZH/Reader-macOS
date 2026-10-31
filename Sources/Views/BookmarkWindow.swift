@@ -2,7 +2,7 @@ import AppKit
 
 /// 书签面板。
 ///
-/// 之前书签是「只能加不能看」：`⌘M` 能加、也能存进 `.cache.dat`、书架里还能看到数量，
+/// 之前书签是「只能加不能看」：快捷键能加、也能存进 `.cache.dat`、书架里还能看到数量，
 /// 但没有任何地方能列出它们并跳回去 —— 等于白存。
 final class BookmarkWindowController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
 
@@ -112,11 +112,16 @@ final class BookmarkWindowController: NSObject, NSTableViewDataSource, NSTableVi
         reload()
     }
 
+    /// 界面里展示快捷键一律走这里（用户改了键位要跟着变）
+    private func shortcutText(_ action: ShortcutAction) -> String {
+        store.settings.shortcut(action)?.symbols ?? "未设置"
+    }
+
     private func updateHint() {
         if book == nil {
-            hintLabel.stringValue = "还没有打开书。用 ⌘O 打开一本，再按 ⌘M 加书签。"
+            hintLabel.stringValue = "还没有打开书。用 \(shortcutText(.openFile)) 打开一本，再按 \(shortcutText(.addBookmark)) 加书签。"
         } else if marks.isEmpty {
-            hintLabel.stringValue = "这本书还没有书签 —— 读到想记的地方按 ⌘M（每本最多 256 个）"
+            hintLabel.stringValue = "这本书还没有书签 —— 读到想记的地方按 \(shortcutText(.addBookmark))（每本最多 256 个）"
         } else {
             hintLabel.stringValue = "共 \(marks.count) 个书签 · 双击或点「跳转」回到该位置"
         }

@@ -31,6 +31,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var bgImageHint: NSTextField!
     /// 「找不到文件」那一行；没有问题时整行收起（隐藏控件不收起行会留一条空白）
     private var bgImageHintRow: NSGridRow?
+
+    // 快捷键页
+    private var shortcutRecorders: [ShortcutAction: ShortcutRecorderView] = [:]
+    private var shortcutResetButtons: [ShortcutAction: NSButton] = [:]
+    private var shortcutConflictBanner: NSStackView!
+    private var shortcutConflictLabel: NSTextField!
+    private var shortcutMessageLabel: NSTextField!
+    /// 待确认的冲突：用户想给 action 设 combo，但被 other 占着
+    private var pendingConflict: (action: ShortcutAction, combo: KeyCombo, other: ShortcutAction)?
+    private var shortcutConflictRow: NSGridRow?
+    private var shortcutMessageRow: NSGridRow?
     private var alphaSlider: NSSlider!
     private var alphaLabel: NSTextField!
     private var menuBarCheck: NSButton!
@@ -151,6 +162,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             entry("翻页", buildPageTab()),
             entry("窗口", buildWindowTab()),
             entry("章节", buildChapterTab()),
+            entry("快捷键", buildShortcutTab()),
             entry("其他", buildOtherTab()),
         ]
         let contentWidth = max(470, built.map { $0.2.width }.max() ?? 470)
@@ -411,6 +423,223 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         return wrap(grid)
     }
 
+    // MARK: - 快捷键页
+
+    private func buildShortcutTab() -> (NSScrollView, NSSize) {
+        // 单独的网格：功能名列要放得下「在访达中显示存档」这种 8 字标题
+        let grid = NSGridView(numberOfColumns: 3, rows: 0)
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).xPlacement = .fill
+        grid.column(at: 2).xPlacement = .leading
+        grid.column(at: 0).width = 118
+        grid.column(at: 1).width = 214
+        grid.rowSpacing = 8
+        grid.columnSpacing = 10
+        shortcutRecorders.removeAll()
+        shortcutResetButtons.removeAll()
+
+        for category in ShortcutCategory.allCases {
+            section(grid, category.title)
+            for action in ShortcutAction.allCases where action.category == category {
+                let recorder = ShortcutRecorderView(frame: .zero)
+                recorder.translatesAutoresizingMaskIntoConstraints = false
+                recorder.widthAnchor.constraint(equalToConstant: 190).isActive = true
+                recorder.heightAnchor.constraint(equalToConstant: 24).isActive = true
+                recorder.onCommit = { [weak self] combo in self?.commitShortcut(combo, for: action) }
+                recorder.onBegin = { [weak self] in self?.beginRecording(action) }
+                recorder.onCancel = { [weak self] in self?.endRecording() }
+                recorder.onReject = { [weak self] message in self?.showShortcutMessage(message) }
+                shortcutRecorders[action] = recorder
+
+                let reset = NSButton(title: "还原",
+                                     target: self, action: #selector(resetShortcutClicked(_:)))
+                reset.bezelStyle = .rounded
+                reset.tag = ShortcutAction.allCases.firstIndex(of: action) ?? 0
+                shortcutResetButtons[action] = reset
+
+                grid.addRow(with: [label(action.title), recorder, reset])
+            }
+        }
+
+        // 冲突提示条：默认隐藏，有冲突时显示「和谁冲突 + 交换 / 取消」
+        shortcutConflictLabel = NSTextField(labelWithString: "")
+        shortcutConflictLabel.font = NSFont.systemFont(ofSize: 11)
+        shortcutConflictLabel.textColor = .systemRed
+        let swapButton = NSButton(title: "交换",
+                                  target: self, action: #selector(swapConflictClicked))
+        swapButton.bezelStyle = .rounded
+        let cancelButton = NSButton(title: "取消",
+                                    target: self, action: #selector(cancelConflictClicked))
+        cancelButton.bezelStyle = .rounded
+        shortcutConflictBanner = NSStackView(views: [shortcutConflictLabel, swapButton, cancelButton])
+        shortcutConflictBanner.orientation = .horizontal
+        shortcutConflictBanner.spacing = 8
+        let conflictRow = grid.addRow(with: [shortcutConflictBanner])
+        conflictRow.mergeCells(in: NSRange(location: 0, length: 3))
+        conflictRow.isHidden = true
+        shortcutConflictRow = conflictRow
+
+        // 非法键 / 其它提示（录制器拒绝时显示原因，不静默吞掉）
+        shortcutMessageLabel = NSTextField(labelWithString: "")
+        shortcutMessageLabel.font = NSFont.systemFont(ofSize: 11)
+        shortcutMessageLabel.textColor = .systemRed
+        let messageRow = grid.addRow(with: [shortcutMessageLabel])
+        messageRow.mergeCells(in: NSRange(location: 0, length: 3))
+        messageRow.isHidden = true
+        shortcutMessageRow = messageRow
+
+        let resetAll = NSButton(title: "全部还原默认",
+                                target: self, action: #selector(resetAllShortcutsClicked))
+        resetAll.bezelStyle = .rounded
+        grid.addRow(with: [NSGridCell.emptyContentView, resetAll])
+
+        let note = NSTextField(wrappingLabelWithString:
+            "点一下快捷键就能就地录制：按下组合键即刻生效，Esc 取消，Delete 清除绑定。\n" +
+            "字母 / 数字 / 符号必须搭配至少一个修饰键。系统标准键（command + Q / W / H、最小化 command + M）固定不变，不在这里。")
+        note.font = NSFont.systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = 360
+        let noteRow = grid.addRow(with: [note])
+        noteRow.mergeCells(in: NSRange(location: 0, length: 3))
+
+        return wrap(grid)
+    }
+
+    /// 刷新快捷键页的显示。设置变化后（含外部改动）都要调。
+    func refreshShortcutState() {
+        for action in ShortcutAction.allCases {
+            guard let recorder = shortcutRecorders[action] else { continue }
+            if pendingConflict?.action == action { continue }   // 别覆盖冲突候选
+            recorder.update(store.settings.shortcut(action))
+            shortcutResetButtons[action]?.isEnabled = store.settings.shortcutIsOverridden(action)
+        }
+        updateShortcutDependentLabels()
+    }
+
+    /// 所有引用快捷键的界面文案都从这里刷新 —— 不允许写死（用户改了键位要立刻变）
+    private func updateShortcutDependentLabels() {
+        func display(_ action: ShortcutAction) -> String {
+            // 设置页里除「快捷键」页之外的行内提示用紧凑图标（和菜单栏一致）；
+            // 快捷键页的格子仍然是全称。
+            store.settings.shortcut(action)?.symbols ?? "未设置"
+        }
+        hideChromeCheck?.title = "沉浸模式：隐藏顶栏和底栏（\(display(.toggleHideChrome))）"
+        autoPageCheck?.title = "启用自动翻页（\(display(.toggleAutoPage))）"
+    }
+
+    // MARK: - 快捷键：录制 / 冲突 / 还原
+
+    private func beginRecording(_ action: ShortcutAction) {
+        for (a, recorder) in shortcutRecorders where a != action {
+            recorder.cancelRecording()      // 同一时间只允许一个录制器
+        }
+        clearConflict()
+        hideShortcutMessage()
+    }
+
+    /// 录制被取消（Esc / 点别处）：把冲突候选也一起撤销
+    private func endRecording() {
+        if pendingConflict != nil {
+            clearConflict()
+            refreshShortcutState()
+        }
+    }
+
+    private func commitShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
+        guard let recorder = shortcutRecorders[action] else { return }
+        if let combo {
+            // 冲突：不静默拒绝，也不强行覆盖 —— 弹「交换 / 取消」
+            if let other = store.settings.conflictingAction(for: combo, excluding: action) {
+                pendingConflict = (action, combo, other)
+                recorder.showConflictCandidate(combo)
+                shortcutConflictLabel.stringValue =
+                    "「\(combo.display)」已经被「\(other.title)」占用"
+                shortcutConflictRow?.isHidden = false
+                return
+            }
+            hideShortcutMessage()
+            apply { $0.setShortcut(combo, for: action) }
+            recorder.update(combo)
+        } else {
+            // Delete：清掉绑定（存空串，与「没改过」区分）
+            hideShortcutMessage()
+            apply { $0.setShortcut(nil, for: action) }
+            recorder.update(nil)
+        }
+        clearConflict()
+        refreshShortcutState()
+    }
+
+    @objc private func swapConflictClicked() {
+        guard let pending = pendingConflict else { return }
+        let otherCombo = store.settings.shortcut(pending.other)
+        let myCombo = store.settings.shortcut(pending.action)
+        apply {
+            $0.setShortcut(otherCombo, for: pending.action)
+            $0.setShortcut(myCombo, for: pending.other)
+        }
+        clearConflict()
+        refreshShortcutState()
+    }
+
+    @objc private func cancelConflictClicked() {
+        clearConflict()
+        refreshShortcutState()
+    }
+
+    private func clearConflict() {
+        pendingConflict = nil
+        shortcutConflictRow?.isHidden = true
+        for recorder in shortcutRecorders.values {
+            recorder.clearConflictHighlight()
+        }
+    }
+
+    @objc private func resetShortcutClicked(_ sender: NSButton) {
+        let all = ShortcutAction.allCases
+        guard all.indices.contains(sender.tag) else { return }
+        let action = all[sender.tag]
+        apply { $0.resetShortcut(action) }
+        clearConflict()
+        refreshShortcutState()
+    }
+
+    @objc private func resetAllShortcutsClicked() {
+        apply { $0.resetAllShortcuts() }
+        clearConflict()
+        refreshShortcutState()
+    }
+
+    private func showShortcutMessage(_ message: String) {
+        shortcutMessageLabel.stringValue = message
+        shortcutMessageRow?.isHidden = false
+    }
+
+    private func hideShortcutMessage() {
+        shortcutMessageRow?.isHidden = true
+    }
+
+    // 自检用
+    var debugConflictVisible: Bool { !(shortcutConflictRow?.isHidden ?? true) }
+    var debugPendingConflictOther: ShortcutAction? { pendingConflict?.other }
+    func debugShortcutText(_ action: ShortcutAction) -> String {
+        shortcutRecorders[action]?.currentDisplayText ?? ""
+    }
+    func debugSetShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
+        commitShortcut(combo, for: action)
+    }
+    func debugSwapConflict() { swapConflictClicked() }
+    func debugResetShortcut(_ action: ShortcutAction) {
+        apply { $0.resetShortcut(action) }
+        clearConflict()
+        refreshShortcutState()
+    }
+    func debugResetAllShortcuts() {
+        apply { $0.resetAllShortcuts() }
+        clearConflict()
+        refreshShortcutState()
+    }
+
     private func buildPageTab() -> (NSScrollView, NSSize) {
         let grid = makeGrid()
 
@@ -438,7 +667,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         grid.addRow(with: [label("左右一起按"), mouseBothPopup])
 
         section(grid, "自动翻页")
-        autoPageCheck = NSButton(checkboxWithTitle: "启用自动翻页（⇧⌘A）",
+        autoPageCheck = NSButton(checkboxWithTitle: "启用自动翻页",
                                  target: self, action: #selector(autoPageToggled))
         grid.addRow(with: [NSGridCell.emptyContentView, autoPageCheck])
 
@@ -470,7 +699,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         alphaLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
         grid.addRow(with: [label("不透明度"), alphaSlider, alphaLabel])
 
-        hideChromeCheck = NSButton(checkboxWithTitle: "沉浸模式：隐藏顶栏和底栏（⇧⌘B）",
+        hideChromeCheck = NSButton(checkboxWithTitle: "沉浸模式：隐藏顶栏和底栏",
                                    target: self, action: #selector(hideChromeChanged))
         grid.addRow(with: [NSGridCell.emptyContentView, hideChromeCheck])
 
@@ -708,6 +937,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         keywordField.stringValue = s.chapterRule.keyword
         regexField.stringValue = s.chapterRule.regex
         updateRuleFieldState()
+
+        // 快捷键页 + 所有引用快捷键的文案
+        refreshShortcutState()
     }
 
     private func updateRuleFieldState() {
@@ -1031,6 +1263,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             s.smoothScroll = fresh.smoothScroll
             s.leftLineCount = fresh.leftLineCount
             s.chapterRule = fresh.chapterRule
+            s.resetAllShortcuts()
         }
         syncFromSettings()
         onChange()

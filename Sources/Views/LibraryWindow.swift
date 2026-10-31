@@ -189,7 +189,7 @@ final class LibraryWindowController: NSObject, NSTableViewDataSource, NSTableVie
     private func updateHint() {
         let items = store.items
         if items.isEmpty {
-            hintLabel.stringValue = "书架是空的 —— 用 ⌘O 打开一个 TXT 就会出现在这里；存档位于 ~/Library/Application Support/Reader/.cache.dat（菜单「文件 → 在访达中显示存档」）"
+            hintLabel.stringValue = "书架是空的 —— 用 \(store.settings.shortcut(.openFile)?.symbols ?? "未设置") 打开一个 TXT 就会出现在这里；存档位于 ~/Library/Application Support/Reader/.cache.dat（菜单「文件 → 在访达中显示存档」）"
             return
         }
         let missing = store.missingFileCount
