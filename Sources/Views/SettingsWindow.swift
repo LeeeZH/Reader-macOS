@@ -21,6 +21,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var alphaLabel: NSTextField!
     private var menuBarCheck: NSButton!
     private var hotKeyCheck: NSButton!
+    private var keepOnTopCheck: NSButton!
     private var autoPageIntervalSlider: NSSlider!
     private var autoPageIntervalLabel: NSTextField!
     private var autoPageModePopup: NSPopUpButton!
@@ -77,6 +78,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     /// 自检用：颜色块是否可点（曾经因为「跟随系统」默认开启而被禁用）
     var debugColorWellsEnabled: Bool { (textColorWell?.isEnabled ?? false) && (bgColorWell?.isEnabled ?? false) }
+    /// 自检用：「窗口置顶」复选框的勾选状态（要和菜单 / 托盘联动）
+    var debugKeepOnTopChecked: Bool { keepOnTopCheck?.state == .on }
 
     /// 自动翻页是运行时状态（不在存档里），由外部提供
     var onToggleAutoPage: (() -> Void)?
@@ -365,6 +368,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                    target: self, action: #selector(hideChromeChanged))
         grid.addRow(with: [NSGridCell.emptyContentView, hideChromeCheck])
 
+        section(grid, "置顶")
+        keepOnTopCheck = NSButton(checkboxWithTitle: "窗口置顶：浮在其它应用上面",
+                                  target: self, action: #selector(keepOnTopChanged))
+        // 标题太长会把复选框的文字截断（设置窗口宽度由最宽的一页决定），
+        // 细节放 tooltip 里
+        keepOnTopCheck.toolTip = "勾选后 Reader 浮在其它应用的普通 / 最大化窗口之上，"
+            + "点别的应用也挡不住它。别人按绿色按钮进的原生全屏盖不住。"
+        grid.addRow(with: [NSGridCell.emptyContentView, keepOnTopCheck])
+
         section(grid, "入口")
         menuBarCheck = NSButton(checkboxWithTitle: "在菜单栏显示图标",
                                 target: self, action: #selector(menuBarChanged))
@@ -506,6 +518,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         autoPageModePopup.selectItem(at: (s.autoPageMode & 0x0F) == 0x01 ? 1 : 0)
         autoPageCheck.state = isAutoPageOn() ? .on : .off
         hideChromeCheck.state = s.hideChrome ? .on : .off
+        keepOnTopCheck.state = s.keepOnTop ? .on : .off
         selectAction(mouseLeftPopup, s.mouseLeftAction)
         selectAction(mouseRightPopup, s.mouseRightAction)
         selectAction(mouseBothPopup, s.mouseBothAction)
@@ -671,6 +684,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     @objc private func hotKeyChanged() {
         let on = hotKeyCheck.state == .on
         apply { $0.globalHotKey = on }
+    }
+
+    @objc private func keepOnTopChanged() {
+        let on = keepOnTopCheck.state == .on
+        apply { $0.keepOnTop = on }
     }
 
     @objc private func autoPageIntervalChanged() {

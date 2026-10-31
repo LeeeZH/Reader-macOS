@@ -14,6 +14,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var onShowSettings: (() -> Void)?
     var onToggleAutoPage: (() -> Void)?
     var isAutoPageOn: () -> Bool = { false }
+    var onToggleKeepOnTop: (() -> Void)?
+    var isKeepOnTop: () -> Bool = { false }
     var onToggleChrome: (() -> Void)?
     var isChromeHidden: () -> Bool = { false }
 
@@ -44,6 +46,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             .target = self
         menu.addItem(withTitle: "自动翻页", action: #selector(doToggleAutoPage), keyEquivalent: "")
             .target = self
+        menu.addItem(withTitle: "窗口置顶", action: #selector(doToggleKeepOnTop), keyEquivalent: "")
+            .target = self
         menu.addItem(withTitle: "沉浸阅读（隐藏顶栏和底栏）", action: #selector(doToggleChrome), keyEquivalent: "")
             .target = self
         menu.addItem(.separator())
@@ -66,9 +70,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         let autoOn = isAutoPageOn()
         let chromeHidden = isChromeHidden()
+        let keepOnTop = isKeepOnTop()
         for menuItem in menu.items {
             switch menuItem.action {
             case #selector(doToggleAutoPage): menuItem.state = autoOn ? .on : .off
+            case #selector(doToggleKeepOnTop): menuItem.state = keepOnTop ? .on : .off
             case #selector(doToggleChrome):   menuItem.state = chromeHidden ? .on : .off
             default: break
             }
@@ -80,5 +86,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func doShowLibrary() { onShowLibrary?() }
     @objc private func doShowSettings() { onShowSettings?() }
     @objc private func doToggleAutoPage() { onToggleAutoPage?() }
+    @objc private func doToggleKeepOnTop() { onToggleKeepOnTop?() }
     @objc private func doToggleChrome() { onToggleChrome?() }
+
+    // MARK: - 自检探针
+
+    /// 自检用：先按真实路径刷新勾选状态，再取某项的状态
+    func debugState(ofTitle title: String) -> NSControl.StateValue {
+        if let menu = item?.menu { menuNeedsUpdate(menu) }
+        return item?.menu?.items.first(where: { $0.title == title })?.state ?? .off
+    }
+
+    /// 自检用：等价于点托盘菜单里的「窗口置顶」
+    func debugToggleKeepOnTop() { doToggleKeepOnTop() }
 }

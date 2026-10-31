@@ -57,6 +57,17 @@ struct ReaderSettings {
     /// 和上面几个一样存成 header 自定义键 `macos_find_case_sensitive`，Windows 版忽略。
     var findCaseSensitive: Bool = false
 
+    /// 窗口置顶：主窗口浮在其它应用的普通窗口 / 最大化窗口之上
+    /// （`NSWindow.level = .floating`）。
+    ///
+    /// 为什么只做到 `floating`，不去盖别人的**原生全屏**：
+    /// 原生全屏是独立 Space，跨 App 覆盖要靠 `.canJoinAllSpaces` +
+    /// `.fullScreenAuxiliary` + 更高 level，属于系统没承诺的灰区，升级可能就坏。
+    /// 需求只到「最大化应用也不挡住」，floating 就够，而且稳定。
+    ///
+    /// 存成 header 自定义键 `macos_always_on_top`，Windows 版读到会忽略。
+    var keepOnTop: Bool = false
+
     /// 鼠标每个键分别做什么（取代原版 page_mode 的预设）
     enum MouseAction: Int, CaseIterable {
         case none = 0          // 不动作
@@ -137,6 +148,7 @@ struct ReaderSettings {
         globalHotKey = header["macos_hotkey"]?.boolValue ?? true
         hideChrome = header["macos_hide_chrome"]?.boolValue ?? false
         findCaseSensitive = header["macos_find_case_sensitive"]?.boolValue ?? false
+        keepOnTop = header["macos_always_on_top"]?.boolValue ?? false
         pageMode = header["page_mode"]?.intValue ?? 1
         // 注意这里是「禁用」语义：原版默认 1（禁用），缺省时我们取 0（启用）
         disableBothClickHide = (header["disable_lrhide"]?.intValue ?? 0) != 0
@@ -222,6 +234,7 @@ struct ReaderSettings {
         set("macos_hotkey", .int(globalHotKey ? 1 : 0))
         set("macos_hide_chrome", .int(hideChrome ? 1 : 0))
         set("macos_find_case_sensitive", .int(findCaseSensitive ? 1 : 0))
+        set("macos_always_on_top", .int(keepOnTop ? 1 : 0))
         // 反向推导回原版字段，保证 Windows 版读到的行为别太离谱
         let winPageMode: Int = (mouseLeftAction == .none && mouseRightAction == .none) ? 0 : 1
         set("page_mode", .int(winPageMode))

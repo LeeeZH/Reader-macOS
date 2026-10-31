@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var statusLabel: NSTextField!
     private var libraryWindow: LibraryWindowController?
     private var autoPageMenuItem: NSMenuItem?
+    private var keepOnTopMenuItem: NSMenuItem?
     private var editMenuItem: NSMenuItem?
     private var hideChromeMenuItem: NSMenuItem?
     private var dragStrip: WindowDragStrip?
@@ -70,6 +71,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var debugWindowHasShadow: Bool { window?.hasShadow ?? false }
     var debugWindowOpaque: Bool { window?.isOpaque ?? true }
     var debugIsWindowReady: Bool { isWindowReady }
+    /// 自检用：窗口是否置顶（floating level）
+    var debugWindowLevelIsFloating: Bool { window?.level == .floating }
+    /// 自检用：失焦后窗口是否保持可见（NSPanel 默认会隐藏，我们要 false）
+    var debugWindowHidesOnDeactivate: Bool { window?.hidesOnDeactivate ?? true }
+    /// 自检用：本 App 已创建的辅助窗口的层级（置顶时必须跟主窗口一致，
+    /// 否则「设置 / 书架 / 书签 / 查找」会被自己家浮起来的主窗口盖住）
+    var debugAuxWindowLevels: [NSWindow.Level] {
+        [libraryWindow?.window, bookmarkWindow?.window, settingsWindow?.window,
+         chapterSearchWindow?.window, findWindow?.window].compactMap { $0?.level }
+    }
 
     // MARK: - 生命周期
 
@@ -173,6 +184,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // EXC_BAD_ACCESS / objc_msgSend / AppDelegate.applicationWillTerminate）。
         // 另外三个辅助窗口一直设了 false，唯独主窗口漏了。
         window.isReleasedWhenClosed = false
+        // 失焦不隐藏。NSWindow 默认就是 false，这里显式写出来是为了防止以后
+        // 把主窗口改成 NSPanel（为了不抢焦点）时悄悄变成「点别的应用就消失」——
+        // NSPanel 的 hidesOnDeactivate 默认是 **true**。
+        window.hidesOnDeactivate = false
         // 还原上次的窗口大小与位置（存在 .cache.dat 的 header.placement，与原版同字段）
         if let saved = library.mainWindowFrame(primaryScreenHeight: NSScreen.primaryHeight,
                                                screenFrames: NSScreen.screens.map { $0.visibleFrame }) {
@@ -345,6 +360,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         settingsWindow?.syncFromSettings()
     }
 
+    // MARK: - 窗口置顶
+
+    /// 「窗口置顶」开关：菜单「视图」、菜单栏图标菜单、设置窗口三处共用。
+    /// 统一走这里改设置，再由 `applySettingsToReader()` 把窗口层级套上去。
+    @objc func toggleKeepOnTop(_ sender: Any?) {
+        library.updateSettings { $0.keepOnTop.toggle() }
+        applySettingsToReader()
+        // 设置窗口可能开着，勾选状态要跟着变（它自己的控件不经过 onChange）
+        settingsWindow?.syncFromSettings()
+        syncKeepOnTopMenuState()
+    }
+
+    /// 把勾选状态同步到「视图 → 窗口置顶」。
+    /// 设置窗口里改的、托盘菜单里改的，最终都会走到 `applySettingsToReader()`，
+    /// 所以在那里面统一刷新一次就够。
+    private func syncKeepOnTopMenuState() {
+        keepOnTopMenuItem?.state = library.settings.keepOnTop ? .on : .off
+    }
+
     // MARK: - 编辑模式（对应原版 Ctrl+E）
 
     /// 编辑模式：在阅读区盖一层可编辑的 NSTextView。
@@ -469,6 +503,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             statusItemController.onToggleAutoPage = { [weak self] in self?.toggleAutoPage(nil) }
             statusItemController.isAutoPageOn = { [weak self] in self?.autoPageTimer != nil }
+            statusItemController.onToggleKeepOnTop = { [weak self] in self?.toggleKeepOnTop(nil) }
+            statusItemController.isKeepOnTop = { [weak self] in self?.library.settings.keepOnTop ?? false }
             statusItemController.onToggleChrome = { [weak self] in
                 // 窗口藏着的时候点它，先叫回来再切——否则改了也看不见
                 self?.showMainWindow()
@@ -633,6 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
         }
         bookmarkWindow?.update(book: readingView.book)
+        applyWindowLevels(auxWillShow: true)
         bookmarkWindow?.show()
     }
 
@@ -658,6 +695,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self.window.makeKeyAndOrderFront(nil)
             }
         }
+        applyWindowLevels(auxWillShow: true)
         chapterSearchWindow?.show(book: book, currentOffset: readingView.pageStart)
     }
 
@@ -685,6 +723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         ensureFindWindow()
+        applyWindowLevels(auxWillShow: true)
         findWindow?.show(book: book, currentOffset: readingView.pageStart,
                          caseSensitive: library.settings.findCaseSensitive)
     }
@@ -702,6 +741,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             findWindow?.nextHit()
             return
         }
+        applyWindowLevels(auxWillShow: true)
         findWindow?.show(book: book, currentOffset: readingView.pageStart,
                          caseSensitive: library.settings.findCaseSensitive)
     }
@@ -718,6 +758,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             findWindow?.previousHit()
             return
         }
+        applyWindowLevels(auxWillShow: true)
         findWindow?.show(book: book, currentOffset: readingView.pageStart,
                          caseSensitive: library.settings.findCaseSensitive)
     }
@@ -768,7 +809,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             wc.isAutoPageOn = { [weak self] in self?.autoPageTimer != nil }
             settingsWindow = wc
         }
+        applyWindowLevels(auxWillShow: true)
         settingsWindow?.show()
+    }
+
+    /// 主窗口置顶——**只给主窗口**，辅助窗口（设置 / 书架 / 书签 / 查找）
+    /// 保持普通 level，不跟着浮在别的应用上面。
+    ///
+    /// ⚠️ 但窗口 level 是系统级**绝对**排序：主窗口 floating、辅助窗口 normal 时，
+    /// 辅助窗口会被自己家的主窗口盖住（实测 `orderFront` + `makeKey` 都压不过
+    /// level 更高的窗口）。所以辅助窗口可见期间把主窗口临时降回 normal；
+    /// 这时我们的 App 是激活的，主窗口仍在别的应用之上。等用户回到阅读窗口
+    /// （主窗口重新成为 key）再自动恢复置顶。
+    /// - Parameter auxWillShow: 即将显示一个辅助窗口。要在 `show()` **之前**调用，
+    ///   先降级再显示，避免「设置窗口先出现在书下面、再被翻上来」闪一下。
+    private func applyWindowLevels(auxWillShow: Bool = false) {
+        let auxVisible = auxWillShow || [libraryWindow?.window, bookmarkWindow?.window,
+                                          settingsWindow?.window, chapterSearchWindow?.window,
+                                          findWindow?.window].contains { $0?.isVisible == true }
+        window?.level = (library.settings.keepOnTop && !auxVisible) ? .floating : .normal
+    }
+
+    /// 从设置 / 书架 / 查找回到阅读窗口：恢复置顶（辅助窗口可能刚关掉）。
+    func windowDidBecomeKey(_ notification: Notification) {
+        applyWindowLevels()
     }
 
     /// 统一处理窗口外观：透明（alpha）、顶栏、底栏、拖动条。
@@ -806,6 +870,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             window.styleMask.remove(.fullSizeContentView)
         }
         window.titlebarAppearsTransparent = hide || translucent
+
+        // ── 窗口置顶 ──
+        // 窗口 level 是**系统级**排序：即使别的应用处于激活状态，只要它的窗口是普通
+        // level，我们的窗口就在上面。需求只到「最大化应用也不挡住」，floating 就够。
+        //
+        // ⚠️ 不要顺手加 .canJoinAllSpaces / .fullScreenAuxiliary 或更高 level：
+        //    那会把窗口塞进别人的**原生全屏** Space，是系统没承诺的灰区
+        //    （详见 ReaderSettings.keepOnTop 的注释）。要做必须先单独验证。
+        applyWindowLevels()
 
         // ── 底栏：状态文字 + 阅读区高度 ──
         statusLabel?.isHidden = hide
@@ -857,6 +930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             findWindow?.update(book: book)
         }
         readingView.settings = s
+        syncKeepOnTopMenuState()
     }
 
     // MARK: - 窗口尺寸记忆
@@ -900,6 +974,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 self?.closeCurrentBook()
             }
         }
+        applyWindowLevels(auxWillShow: true)
         libraryWindow?.show()
     }
 
@@ -1175,6 +1250,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let customize = NSMenuItem(title: "自定义触控栏…",
                                    action: #selector(NSApplication.toggleTouchBarCustomizationPalette(_:)),
                                    keyEquivalent: "")
+        // 窗口置顶：和「设置 → 窗口」「菜单栏图标菜单」是同一个开关，
+        // 三处联动，状态由 syncKeepOnTopMenuState() 统一刷新
+        let keepOnTop = NSMenuItem(title: "窗口置顶",
+                                   action: #selector(toggleKeepOnTop(_:)), keyEquivalent: "t")
+        // ⌃⌘T：T 取自 Top；和全屏的 ⌃⌘F 同一套「控制键 + 命令键」的组合
+        keepOnTop.keyEquivalentModifierMask = [.command, .control]
+        keepOnTop.target = self
+        keepOnTop.state = library.settings.keepOnTop ? .on : .off
+        keepOnTopMenuItem = keepOnTop
+        viewMenu.addItem(keepOnTop)
+        viewMenu.addItem(.separator())
         viewMenu.addItem(customize)
         viewMenu.addItem(.separator())
         // ⌘F 已经给「查找」了（macOS 的通用约定），全屏沿用系统标准的 ⌃⌘F
@@ -1334,6 +1420,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// 自检用：等价于点菜单「跳转到章节…」（顺带验证菜单动作接线）
     func debugShowChapterSearch() { showChapterSearch(nil) }
+
+    // MARK: 自检探针（窗口置顶三处联动）
+
+    /// 自检用：「视图 → 窗口置顶」的勾选状态
+    var debugKeepOnTopMenuState: NSControl.StateValue { keepOnTopMenuItem?.state ?? .off }
+    /// 自检用：等价于点菜单「视图 → 窗口置顶」
+    func debugToggleKeepOnTopFromMenu() { toggleKeepOnTop(nil) }
+    /// 自检用：托盘（菜单栏图标）控制器
+    var debugStatusItemController: StatusItemController { statusItemController }
+    /// 自检用：设置窗口里「窗口置顶」复选框的勾选状态
+    var debugSettingsKeepOnTopChecked: Bool { settingsWindow?.debugKeepOnTopChecked ?? false }
+
+    /// 自检用：关掉全部辅助窗口并让主窗口重新成为 key
+    /// （用来验证「辅助窗口关掉后主窗口恢复置顶」）
+    func debugCloseAuxWindows() {
+        for w in [libraryWindow?.window, bookmarkWindow?.window, settingsWindow?.window,
+                  chapterSearchWindow?.window, findWindow?.window] {
+            w?.performClose(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
+        applyWindowLevels()
+    }
 
     // MARK: 自检探针（全文搜索）
 

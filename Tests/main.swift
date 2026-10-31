@@ -1682,6 +1682,30 @@ findSettings.apply(to: &findHeader)
 check(ReaderSettings(header: findHeader).findCaseSensitive, "★ 区分大小写写进存档后能读回来")
 check(findHeader["macos_find_case_sensitive"]?.intValue == 1, "存档里是自定义键 macos_find_case_sensitive")
 
+// ============ 25. 窗口置顶（level / 失焦隐藏 / 存档） ============
+print("\n[25] 窗口置顶")
+
+// 需求：勾选后主窗口浮在其它应用的普通 / 最大化窗口之上。
+// 这里能钉住的是「设置怎么存」和「AppKit 状态怎么变」；
+// 「真的盖住别的 App」只能人手看（selftest 里也只验 level）。
+var topSettings = ReaderSettings()
+check(!topSettings.keepOnTop, "窗口置顶默认关闭（不打扰不知道有这功能的用户）")
+topSettings.keepOnTop = true
+var topHeader = CacheSchema.defaultHeader()
+topSettings.apply(to: &topHeader)
+check(ReaderSettings(header: topHeader).keepOnTop, "★ 置顶开关写进存档后能读回来")
+check(topHeader["macos_always_on_top"]?.intValue == 1, "存档里是自定义键 macos_always_on_top")
+
+// AppKit 侧：floating level 才真的浮在普通窗口之上
+_ = NSApplication.shared
+let topWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                         styleMask: [.titled], backing: .buffered, defer: false)
+eq(topWindow.level, .normal, "新建窗口默认是 normal level")
+topWindow.level = .floating
+eq(topWindow.level, .floating, "★ 置顶时用 floating level（高于别人的普通窗口）")
+check(topWindow.level.rawValue > NSWindow.Level.normal.rawValue, "floating 的数值高于 normal")
+check(!topWindow.hidesOnDeactivate, "主窗口失焦不隐藏（NSPanel 默认会隐藏，不能误用）")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

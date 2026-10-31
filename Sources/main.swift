@@ -9,6 +9,7 @@ do {
         "--dump-pages", "--library-selftest", "--dump-touchbar",
         "--close-selftest", "--quit-selftest", "--early-open-selftest",
         "--toc-selftest", "--chapter-search-selftest", "--find-selftest",
+        "--always-on-top-selftest",
     ]
     if CommandLine.arguments.contains(where: { devFlags.contains($0) }) {
         let dir = NSTemporaryDirectory() + "reader-devtools-\(ProcessInfo.processInfo.processIdentifier)"
@@ -1119,6 +1120,100 @@ if CommandLine.arguments.contains("--find-selftest") {
           "面板关着按 ⌘G 也是一次空白查找", "查询「\(wc.debugQuery)」结果 \(wc.debugRowCount)")
 
     log(failures == 0 ? "✅ 全文搜索自检全部通过" : "❌ 全文搜索自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// ── 开发者工具：窗口置顶自检 ──
+// 自动能验的是 AppKit 状态（level / 失焦隐藏 / 存档往返）；
+// 「真的盖住别的 App」只能人手看：勾上设置 → 切到别的应用 → 窗口仍在最上面。
+if CommandLine.arguments.contains("--always-on-top-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+
+    check(!delegate.debugWindowLevelIsFloating, "默认不置顶（level = normal）")
+    check(!delegate.debugWindowHidesOnDeactivate, "失焦不隐藏窗口（否则切到别的应用就消失）")
+    check(delegate.debugKeepOnTopMenuState == .off, "「视图 → 窗口置顶」初始未勾选")
+    check(delegate.debugShortcut(menuTitle: "视图", itemTitle: "窗口置顶") == "⌃⌘t",
+          "「窗口置顶」快捷键是 ⌃⌘T",
+          delegate.debugShortcut(menuTitle: "视图", itemTitle: "窗口置顶") ?? "无")
+    check(delegate.debugStatusItemController.debugState(ofTitle: "窗口置顶") == .off,
+          "菜单栏图标里的「窗口置顶」初始未勾选")
+    if let item = delegate.debugMenuItem(menuTitle: "视图", itemTitle: "窗口置顶") {
+        check(item.target === delegate && item.action == #selector(AppDelegate.toggleKeepOnTop(_:)),
+              "菜单项接的是 AppDelegate.toggleKeepOnTop")
+    } else {
+        check(false, "「视图」菜单里有「窗口置顶」")
+    }
+    check(delegate.debugStatusItemController.debugMenuTitles.contains("窗口置顶"),
+          "菜单栏图标菜单里有「窗口置顶」")
+
+    // 设置窗口的复选框也要能查到（后面还要用它验证三处联动）
+    delegate.showSettings(nil)
+    check(!delegate.debugSettingsKeepOnTopChecked, "设置窗口的复选框初始未勾选")
+    delegate.debugCloseAuxWindows()
+
+    // ---- 路径 1：左上角菜单栏的「视图 → 窗口置顶」 ----
+    delegate.debugToggleKeepOnTopFromMenu()
+    check(LibraryStore.shared.settings.keepOnTop, "★ 菜单开关能打开置顶")
+    check(delegate.debugWindowLevelIsFloating, "★ 菜单开关立即生效（窗口 level = floating）")
+    check(delegate.debugKeepOnTopMenuState == .on, "菜单项自己打勾")
+    check(delegate.debugStatusItemController.debugState(ofTitle: "窗口置顶") == .on,
+          "★ 菜单栏图标菜单同步打勾")
+    check(delegate.debugSettingsKeepOnTopChecked, "★ 设置窗口复选框同步打勾")
+    check(!delegate.debugWindowHidesOnDeactivate, "置顶状态下失焦也不隐藏")
+    let floatingLevel = NSWindow.Level.floating.rawValue
+    let normalLevel = NSWindow.Level.normal.rawValue
+    log("  floating level = \(floatingLevel)，normal level = \(normalLevel)（数值越大越靠前）")
+    check(floatingLevel > normalLevel, "floating 的层级高于普通窗口（才能盖住最大化的应用）")
+
+    // ---- 路径 2：右上角菜单栏图标里的「窗口置顶」 ----
+    delegate.debugStatusItemController.debugToggleKeepOnTop()
+    check(!LibraryStore.shared.settings.keepOnTop, "★ 菜单栏图标的开关能关掉置顶")
+    check(!delegate.debugWindowLevelIsFloating, "托盘开关立即生效（回到 normal）")
+    check(delegate.debugKeepOnTopMenuState == .off, "★ 「视图」菜单同步取消勾选")
+    check(!delegate.debugSettingsKeepOnTopChecked, "★ 设置窗口复选框同步取消")
+
+    // ---- 路径 3：设置窗口里改，菜单 / 托盘也要跟着变 ----
+    LibraryStore.shared.updateSettings { $0.keepOnTop = true }
+    delegate.debugReapplySettings()          // 设置窗口改完走的就是这条
+    check(delegate.debugKeepOnTopMenuState == .on, "★ 设置窗口打开置顶后菜单打勾")
+    check(delegate.debugStatusItemController.debugState(ofTitle: "窗口置顶") == .on,
+          "★ 设置窗口打开置顶后菜单栏图标同步")
+    check(delegate.debugWindowLevelIsFloating, "设置窗口的改动也立即生效")
+
+    // ---- 只置顶主窗口：辅助窗口保持 normal，可见期间主窗口临时降级 ----
+    delegate.showSettings(nil)
+    check(!delegate.debugAuxWindowLevels.isEmpty, "已创建辅助窗口（设置窗口）")
+    check(delegate.debugAuxWindowLevels.allSatisfy { $0 == .normal },
+          "★ 辅助窗口不跟着置顶（设置 / 书架 / 书签 / 查找保持 normal）",
+          "\(delegate.debugAuxWindowLevels)")
+    check(!delegate.debugWindowLevelIsFloating,
+          "★ 辅助窗口可见期间主窗口临时降级（否则设置会被置顶的书盖住）")
+
+    delegate.debugCloseAuxWindows()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+    check(delegate.debugWindowLevelIsFloating, "★ 关掉辅助窗口后主窗口恢复置顶")
+
+    delegate.debugToggleKeepOnTopFromMenu()
+    check(!delegate.debugWindowLevelIsFloating, "关掉置顶后回到 normal level")
+    check(!LibraryStore.shared.settings.keepOnTop, "关掉后设置也回到 false")
+
+    // 存档往返：重启后仍生效
+    LibraryStore.shared.updateSettings { $0.keepOnTop = true }
+    _ = LibraryStore.shared.save()
+    let reloaded = LibraryStore(fileURL: LibraryStore.shared.fileURL)
+    reloaded.load()
+    check(reloaded.settings.keepOnTop, "★ 置顶开关写盘后重新加载仍然生效")
+
+    log(failures == 0 ? "✅ 窗口置顶自检全部通过" : "❌ 窗口置顶自检失败 \(failures) 项")
     exit(failures == 0 ? 0 : 1)
 }
 

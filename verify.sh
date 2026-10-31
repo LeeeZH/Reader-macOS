@@ -95,6 +95,16 @@ if [ "$FIND_CODE" -ne 0 ]; then
     echo "  ❌ 全文搜索自检失败（退出码 $FIND_CODE）"; cat "$OUT/find.log"; exit 1
 fi
 
+step "4.10/5 窗口置顶自检（floating level / 失焦不隐藏 / 三处联动 / 存档往返）"
+set +e
+"$BIN" --always-on-top-selftest >"$OUT/top.log" 2>&1
+TOP_CODE=$?
+set -e
+grep -E "✅|❌|level =" "$OUT/top.log" | sed 's/^/  /'
+if [ "$TOP_CODE" -ne 0 ]; then
+    echo "  ❌ 窗口置顶自检失败（退出码 $TOP_CODE）"; cat "$OUT/top.log"; exit 1
+fi
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
