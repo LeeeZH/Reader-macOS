@@ -40,7 +40,7 @@ final class ChapterSearchWindowController: NSObject, NSTableViewDataSource, NSTa
         window.minSize = NSSize(width: 360, height: 300)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        if !window.setFrameAutosaveName("ReaderChapterSearchWindowFrame") { window.center() }
+        if !DevTools.applyFrameAutosaveName(window, "ReaderChapterSearchWindowFrame") { window.center() }
 
         let content = NSView(frame: rect)
         content.autoresizingMask = [.width, .height]
@@ -124,8 +124,9 @@ final class ChapterSearchWindowController: NSObject, NSTableViewDataSource, NSTa
         self.currentOffset = currentOffset
         resetToCurrentBook()
         updateHint()
-        NSApp.activate(ignoringOtherApps: true)
+        DevTools.activate()
         window.makeKeyAndOrderFront(nil)
+        DevTools.park(window)
         window.makeFirstResponder(searchField)
         searchField.selectText(nil)
     }

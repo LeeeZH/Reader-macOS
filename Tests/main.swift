@@ -2140,6 +2140,23 @@ let scFromWindows = ReaderSettings(header: scWindowsHeader)
 check(ShortcutAction.allCases.allSatisfy { scFromWindows.shortcut($0) == $0.defaultCombo },
       "★ Windows 存档（无自定义键）读出来全是默认键位")
 
+// 28.8 等于默认值的覆盖 = 没改过（连续「冲突 → 交换」的 bug）
+var scNoop = ReaderSettings()
+scNoop.setShortcut(ShortcutAction.openFile.defaultCombo, for: .openFile)
+check(scNoop.shortcutOverrides.isEmpty, "★ 设成默认值不产生覆盖项")
+check(!scNoop.shortcutIsOverridden(.openFile), "★ 设成默认值不算「改过」（还原按钮应为灰）")
+eq(scNoop.shortcut(.openFile)?.display, "command + O", "生效键位仍是默认值")
+// 旧存档里已经存在这种冗余覆盖：读出来当没改过，写盘时清掉
+var scLegacyNoop = ReaderSettings()
+scLegacyNoop.shortcutOverrides["open_file"] = ShortcutAction.openFile.defaultCombo.stored
+check(!scLegacyNoop.shortcutIsOverridden(.openFile), "旧存档里等于默认值的覆盖不算改过")
+var scNoopHeader = CacheSchema.defaultHeader()
+scLegacyNoop.apply(to: &scNoopHeader)
+check(scNoopHeader["macos_shortcuts"] == nil, "★ 冗余覆盖在写盘时被清掉（文件不多一行）")
+// 主动清空绑定（空串）仍然算改过
+scNoop.setShortcut(nil, for: .showLibrary)
+check(scNoop.shortcutIsOverridden(.showLibrary), "主动清空绑定仍然算「改过」")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

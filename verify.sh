@@ -20,7 +20,8 @@ step "2/5 单元测试"
 bash "$ROOT/test.sh" | tail -2
 
 step "3/5 应用启动冒烟"
-"$BIN" "$ROOT/samples/古文观止.txt" >"$OUT/smoke.log" 2>&1 &
+# --smoke-launch：走真实启动路径，但用开发工具安静模式（不弹窗、不抢焦点）
+"$BIN" --smoke-launch "$ROOT/samples/古文观止.txt" >"$OUT/smoke.log" 2>&1 &
 PID=$!
 sleep 5
 if kill -0 "$PID" 2>/dev/null; then
@@ -155,7 +156,7 @@ if [ "$BG_CODE" -ne 0 ]; then
 fi
 echo "  ✅ 三种铺法出图正常；文件缺失回落纯色且不崩"
 
-step "4.14/5 快捷键自检（菜单键位 / 录制 / 冲突交换 / 还原 / 文案全称）"
+step "4.14/5 快捷键自检（菜单键位 / 录制 / 冲突提示 / 切页与关窗状态 / 还原 / 文案全称）"
 set +e
 "$BIN" --shortcut-selftest >"$OUT/shortcut.log" 2>&1
 SHORTCUT_CODE=$?

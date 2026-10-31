@@ -128,7 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         buildMenu()
         buildWindow()
         isWindowReady = true
-        NSApp.activate(ignoringOtherApps: true)
+        // 自检 / 渲染进程是安静模式：不抢焦点（详见 Sources/Views/DevTools.swift）
+        DevTools.activate()
 
         if library.recoveredBackupURL != nil {
             statusLabel.stringValue = "⚠️ 存档曾损坏，已备份原文件并从空白开始"
@@ -287,6 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // 且在没有触控栏的机器上也能看到（点了只是没有可自定义的内容）。
 
         window.makeKeyAndOrderFront(nil)
+        DevTools.park(window)
         window.makeFirstResponder(readingView)
     }
 
@@ -750,7 +752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func toggleWindowVisibility() {
         if NSApp.isHidden || !(window?.isVisible ?? false) {
             NSApp.unhide(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            DevTools.activate()
             window?.makeKeyAndOrderFront(nil)
         } else {
             NSApp.hide(nil)
@@ -759,7 +761,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func showMainWindow() {
         NSApp.unhide(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        DevTools.activate()
         window?.makeKeyAndOrderFront(nil)
     }
 
@@ -1687,6 +1689,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 自检用：设置变化后手动重新灌一遍菜单键位
     func debugApplyShortcuts() { applyShortcuts() }
 
+    // 自检用：开发工具安静模式（不进 Dock、不抢焦点、窗口在屏幕外）
+    var debugIsQuietDevtools: Bool { DevTools.isQuiet }
+    var debugAppActivationPolicyIsAccessory: Bool { NSApp.activationPolicy() == .accessory }
+    /// 自检用：主窗口是否被安静模式隐藏（alpha = 0，用户看不到）
+    var debugMainWindowIsInvisible: Bool { (window?.alphaValue ?? 1) == 0 }
+    /// 自检用：设置窗口是否也被安静模式隐藏
+    var debugSettingsWindowIsInvisible: Bool { settingsWindow?.debugWindowIsInvisible ?? false }
+
     // 设置页快捷键页探针（走真实 commit 路径）
     func debugSettingsShortcutText(_ action: ShortcutAction) -> String {
         settingsWindow?.debugShortcutText(action) ?? ""
@@ -1700,6 +1710,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     func debugSettingsSwapConflict() { settingsWindow?.debugSwapConflict() }
     func debugSettingsResetAllShortcuts() { settingsWindow?.debugResetAllShortcuts() }
+    func debugSettingsResetShortcut(_ action: ShortcutAction) {
+        settingsWindow?.debugResetShortcut(action)
+    }
+    func debugSettingsSync() { settingsWindow?.debugSync() }
+    var debugSettingsDuplicateActions: [ShortcutAction] {
+        settingsWindow?.debugSavedDuplicateActions ?? []
+    }
+    var debugSettingsPendingConflictIsReset: Bool {
+        settingsWindow?.debugPendingConflictIsReset ?? false
+    }
+    func debugSettingsResetButtonEnabled(_ action: ShortcutAction) -> Bool {
+        settingsWindow?.debugResetButtonIsEnabled(action) ?? false
+    }
+    var debugSettingsOverriddenActions: [ShortcutAction] {
+        settingsWindow?.debugOverriddenActions ?? []
+    }
+    var debugSettingsConflictedActions: [ShortcutAction] {
+        settingsWindow?.debugConflictedActions ?? []
+    }
+    var debugSettingsConflictBannerOnScreen: Bool {
+        settingsWindow?.debugConflictBannerOnScreen ?? false
+    }
+    func debugSettingsBorderIsRed(_ action: ShortcutAction) -> Bool {
+        settingsWindow?.debugShortcutBorderIsRed(action) ?? false
+    }
+    func debugSettingsSwitchTabAwayAndBack() { settingsWindow?.debugSwitchTabAwayAndBack() }
+    var debugSettingsHintText: String { settingsWindow?.debugShortcutHintText ?? "" }
+    var debugSettingsHintVisible: Bool { settingsWindow?.debugShortcutHintVisible ?? false }
+    func debugSettingsShowMessage(_ message: String) {
+        settingsWindow?.debugShowShortcutMessage(message)
+    }
+    func debugSettingsEndRecording() { settingsWindow?.debugEndRecording() }
+    func debugSettingsIsRecording(_ action: ShortcutAction) -> Bool {
+        settingsWindow?.debugIsRecording(action) ?? false
+    }
+    func debugSettingsBeginRecording(_ action: ShortcutAction) {
+        settingsWindow?.debugBeginRecording(action)
+    }
+    func debugSettingsCancelRecording(_ action: ShortcutAction) {
+        settingsWindow?.debugCancelRecording(action)
+    }
+    func debugSettingsCancelConflict() { settingsWindow?.debugCancelConflict() }
+    func debugCloseSettingsWindow() { settingsWindow?.window.performClose(nil) }
 
     func debugShortcut(menuTitle: String, itemTitle: String) -> String? {
         guard let item = debugMenuItem(menuTitle: menuTitle, itemTitle: itemTitle) else { return nil }

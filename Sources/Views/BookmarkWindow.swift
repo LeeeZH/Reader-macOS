@@ -39,7 +39,7 @@ final class BookmarkWindowController: NSObject, NSTableViewDataSource, NSTableVi
         window.minSize = NSSize(width: 380, height: 220)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        if !window.setFrameAutosaveName("ReaderBookmarkWindowFrame") { window.center() }
+        if !DevTools.applyFrameAutosaveName(window, "ReaderBookmarkWindowFrame") { window.center() }
 
         let content = NSView(frame: rect)
         content.autoresizingMask = [.width, .height]
@@ -97,8 +97,9 @@ final class BookmarkWindowController: NSObject, NSTableViewDataSource, NSTableVi
 
     func show() {
         reload()
-        NSApp.activate(ignoringOtherApps: true)
+        DevTools.activate()
         window.makeKeyAndOrderFront(nil)
+        DevTools.park(window)
     }
 
     /// 换书或加/删书签后都要调

@@ -60,6 +60,11 @@ final class ShortcutRecorderView: NSView {
     /// 自检用：当前显示的文本（全称或「按下快捷键…」）
     var currentDisplayText: String { label.stringValue }
 
+    /// 自检用：边框此刻是不是红色（用户看到的「红框」）
+    var debugBorderIsRed: Bool {
+        layer?.borderColor == NSColor.systemRed.cgColor
+    }
+
     override var acceptsFirstResponder: Bool { true }
 
     /// 外部（设置页 sync）刷值
@@ -76,8 +81,11 @@ final class ShortcutRecorderView: NSView {
         refreshAppearance()
     }
 
-    func clearConflictHighlight() {
-        isConflicted = false
+    /// 只标红、不改显示值。
+    /// 用于两类情况：① 已保存的重复键位（提示用户哪几行撞了）；
+    /// ② 「还原」会和别人撞（还原后的值不先显示，避免界面又出现两个同键）。
+    func setConflictHighlight(_ on: Bool) {
+        isConflicted = on
         refreshAppearance()
     }
 

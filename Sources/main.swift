@@ -12,12 +12,21 @@ do {
         "--toc-selftest", "--chapter-search-selftest", "--find-selftest",
         "--always-on-top-selftest",
         "--shortcut-selftest",
+        "--smoke-launch",
     ]
     if CommandLine.arguments.contains(where: { devFlags.contains($0) }) {
         let dir = NSTemporaryDirectory() + "reader-devtools-\(ProcessInfo.processInfo.processIdentifier)"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         setenv("READER_CACHE_PATH", dir + "/.cache.dat", 1)
-        FileHandle.standardError.write("[开发工具] 存档重定向到 \(dir)\n".data(using: .utf8)!)
+        // 安静模式：不进 Dock、不抢焦点、窗口隐藏（见 Sources/Views/DevTools.swift）。
+        // 否则一次 verify.sh 会启动二十多个进程，每个都把窗口弹到用户面前。
+        // 手工排查想看窗口时：`READER_DEVTOOLS_QUIET=0 $B --xxx-selftest`。
+        let quiet = ProcessInfo.processInfo.environment["READER_DEVTOOLS_QUIET"] != "0"
+        if quiet {
+            setenv("READER_DEVTOOLS_QUIET", "1", 1)
+        }
+        let mode = quiet ? "安静模式，不弹窗" : "显式关闭安静模式"
+        FileHandle.standardError.write("[开发工具] 存档重定向到 \(dir)（\(mode)）\n".data(using: .utf8)!)
     }
 }
 
@@ -712,7 +721,8 @@ let earlyOpenSelftest = CommandLine.arguments.contains("--early-open-selftest")
 
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.regular)
+// 开发工具进程用 .accessory（不进 Dock、不抢焦点）；正常启动仍是 regular
+app.setActivationPolicy(DevTools.activationPolicy)
 
 // ── 开发者工具：目录菜单自检（一级菜单 + 长篇小说全部章节 + 当前章定位 + 跳转）──
 // 旧版目录只列前 300 章，几千章的小说从第 301 章起点不到。
@@ -1271,7 +1281,7 @@ if CommandLine.arguments.contains("--always-on-top-selftest") {
     exit(failures == 0 ? 0 : 1)
 }
 
-// ── 开发者工具：快捷键自检（菜单键位 / 录制 / 冲突交换 / 还原 / 文案全称）──
+// ── 开发者工具：快捷键自检（菜单键位 / 录制 / 冲突提示 / 切页与关窗状态 / 还原 / 文案全称）──
 if CommandLine.arguments.contains("--shortcut-selftest") {
     var failures = 0
     func log(_ msg: String) {
@@ -1287,6 +1297,13 @@ if CommandLine.arguments.contains("--shortcut-selftest") {
 
     delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     let store = LibraryStore.shared
+
+    // ---- 0) 开发工具安静模式：自检进程不能闪窗 / 抢焦点 ----
+    check(delegate.debugIsQuietDevtools, "开发工具跑在安静模式")
+    check(delegate.debugAppActivationPolicyIsAccessory,
+          "★ 自检进程不进 Dock（accessory，不再闪一下 app 图标）")
+    check(delegate.debugMainWindowIsInvisible,
+          "★ 主窗口 alpha=0 隐藏（用户看不到闪窗）")
 
     // ---- 1) 默认键位：注册表 → 菜单 → 显示全称 ----
     for action in ShortcutAction.allCases {
@@ -1373,8 +1390,11 @@ if CommandLine.arguments.contains("--shortcut-selftest") {
     _ = store.save()
     delegate.debugApplyShortcuts()
 
-    // ---- 6) 设置页：就地录制 → 冲突（交换 / 取消）→ 还原，界面全部同步 ----
+    // ---- 6) 设置页：就地录制 → 冲突（提示 / 交换 / 取消）→ 还原，界面全部同步 ----
     delegate.showSettings(nil)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    check(delegate.debugSettingsWindowIsInvisible,
+          "★ 设置窗口 alpha=0 隐藏（自检时不会弹出来）")
     check(delegate.debugSettingsShortcutText(.showFind) == "command + F",
           "设置页打开时显示当前快捷键", delegate.debugSettingsShortcutText(.showFind))
     delegate.debugSettingsSetShortcut(KeyCombo(.character("r"), [.command, .shift]), for: .showFind)
@@ -1384,10 +1404,30 @@ if CommandLine.arguments.contains("--shortcut-selftest") {
           "设置页显示刚录的键位（全称）")
 
     delegate.debugSettingsSetShortcut(KeyCombo(.character("r"), [.command, .shift]), for: .findNext)
-    check(delegate.debugSettingsConflictVisible, "★ 冲突时显示内联提示（不静默拒绝）")
+    RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    check(delegate.debugSettingsConflictVisible, "★ 冲突时显示提示（不静默拒绝）")
+    check(delegate.debugSettingsConflictBannerOnScreen,
+          "★ 冲突提示真的显示在窗口里（不再埋在滚动区底部看不见）",
+          "hint=\(delegate.debugSettingsHintText)")
+    check(delegate.debugSettingsHintText.contains("查找"),
+          "★ 提示写明和哪个功能重复", delegate.debugSettingsHintText)
+    check(delegate.debugSettingsHintText.contains("shift + command + R"),
+          "★ 提示写明重复的键位", delegate.debugSettingsHintText)
     check(delegate.debugSettingsPendingConflictOther == .showFind, "提示里指出与哪个功能冲突")
+    check(delegate.debugSettingsBorderIsRed(.findNext), "冲突候选行有红框")
     check(store.settings.shortcut(.findNext)?.display == "command + G",
           "冲突时先不落盘（等用户选交换或取消）")
+
+    // 切到别的设置页再回来：待确认状态、红框、提示都不能静默消失（用户报的 bug）
+    delegate.debugSettingsSwitchTabAwayAndBack()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    check(delegate.debugSettingsConflictVisible && delegate.debugSettingsConflictBannerOnScreen,
+          "★ 切页再回来冲突提示仍在（不会变成两个同键却不解释）")
+    check(delegate.debugSettingsBorderIsRed(.findNext), "切页再回来红框仍在")
+    check(delegate.debugSettingsShortcutText(.findNext) == "shift + command + R",
+          "切页再回来候选键位仍显示")
+    check(store.settings.shortcut(.findNext)?.display == "command + G",
+          "切页期间冲突仍然不落盘")
 
     delegate.debugSettingsSwapConflict()
     check(store.settings.shortcut(.findNext)?.display == "shift + command + R",
@@ -1397,12 +1437,152 @@ if CommandLine.arguments.contains("--shortcut-selftest") {
           "★ 交换后旧键位给了「查找」",
           store.settings.shortcut(.showFind)?.display ?? "nil")
     check(!delegate.debugSettingsConflictVisible, "交换后冲突提示消失")
+    check(delegate.debugSettingsConflictedActions.isEmpty, "交换后红框清除")
 
     delegate.debugSettingsResetAllShortcuts()
     delegate.debugApplyShortcuts()
     check(delegate.debugSettingsShortcutText(.showFind) == "command + F", "还原后设置页显示默认")
     check(delegate.debugShortcutDisplay(.showFind) == "command + F", "还原后菜单也回到默认")
 
+    // 用户报的原始场景：把「打开文件」设成 command + L（和「阅读列表」撞），
+    // 提示必须说明；随后去录别的键时，那一行必须恢复成真实生效值，
+    // 不能留下一个没保存的 command + L（界面出现两个相同键位）。
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("l"), .command), for: .openFile)
+    check(delegate.debugSettingsConflictVisible && delegate.debugSettingsConflictBannerOnScreen,
+          "★ 打开文件设 command + L 时提示可见",
+          delegate.debugSettingsHintText)
+    check(delegate.debugSettingsHintText.contains("阅读列表") && delegate.debugSettingsHintText.contains("command + L"),
+          "★ 提示写清楚被「阅读列表」的 command + L 占用", delegate.debugSettingsHintText)
+    check(store.settings.shortcut(.openFile)?.display == "command + O",
+          "冲突时不落盘（打开文件仍是 command + O）")
+    delegate.debugSettingsCancelConflict()
+    check(delegate.debugSettingsShortcutText(.openFile) == "command + O",
+          "★ 点「取消」后候选行恢复真实值", delegate.debugSettingsShortcutText(.openFile))
+    check(!delegate.debugSettingsConflictVisible, "点「取消」后提示消失")
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("l"), .command), for: .openFile)
+    delegate.debugSettingsBeginRecording(.showFind)
+    check(delegate.debugSettingsShortcutText(.openFile) == "command + O",
+          "★ 去录别的键后，候选行恢复真实值（界面不再有两个 command + L）",
+          delegate.debugSettingsShortcutText(.openFile))
+    check(delegate.debugSettingsShortcutText(.showLibrary) == "command + L",
+          "「阅读列表」的 command + L 没被误改")
+    check(!delegate.debugSettingsConflictVisible, "放弃冲突后提示消失")
+    check(delegate.debugSettingsConflictedActions.isEmpty, "放弃冲突后红框清除")
+    delegate.debugSettingsCancelRecording(.showFind)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+
+    // ---- 6.5) 用户报的第二个 bug：交换后再「还原」，不能又造出两个 command + L 并存盘 ----
+    delegate.debugSettingsResetAllShortcuts()
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("l"), .command), for: .openFile)
+    delegate.debugSettingsSwapConflict()
+    check(store.settings.shortcut(.openFile)?.display == "command + L", "交换后打开文件 = command + L")
+    check(store.settings.shortcut(.showLibrary)?.display == "command + O", "交换后阅读列表 = command + O")
+    // 此时还原「阅读列表」：默认 command + L 已被打开文件占着，必须提示而不是直接落盘
+    delegate.debugSettingsResetShortcut(.showLibrary)
+    check(delegate.debugSettingsConflictVisible, "★ 还原会和别人撞时先提示（不再静默存盘）")
+    check(delegate.debugSettingsPendingConflictIsReset, "提示来源是「还原」")
+    check(delegate.debugSettingsHintText.contains("还原后"),
+          "提示文案说明这是还原造成的冲突", delegate.debugSettingsHintText)
+    check(store.settings.shortcut(.showLibrary)?.display == "command + O", "冲突时先不还原")
+    check(delegate.debugSettingsShortcutText(.showLibrary) == "command + O",
+          "格子里也显示真实生效值 command + O")
+    check(delegate.debugSettingsDuplicateActions.isEmpty, "此时没有已保存的重复键位")
+    // 交换解决：打开文件回默认 O，阅读列表回默认 L
+    delegate.debugSettingsSwapConflict()
+    check(store.settings.shortcut(.openFile)?.display == "command + O", "★ 交换后打开文件回到 command + O")
+    check(store.settings.shortcut(.showLibrary)?.display == "command + L", "★ 交换后阅读列表回到 command + L")
+    check(delegate.debugSettingsDuplicateActions.isEmpty, "解决后没有重复键位")
+    check(!delegate.debugSettingsConflictVisible, "解决后提示消失")
+    // 取消路径：还原冲突点「取消」，原样保留
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("l"), .command), for: .openFile)
+    delegate.debugSettingsSwapConflict()
+    delegate.debugSettingsResetShortcut(.showLibrary)
+    delegate.debugSettingsCancelConflict()
+    check(store.settings.shortcut(.showLibrary)?.display == "command + O", "取消还原后阅读列表仍是 command + O")
+    check(delegate.debugSettingsDuplicateActions.isEmpty, "取消后没有重复键位")
+    delegate.debugSettingsResetAllShortcuts()
+
+    // ---- 6.6) 旧版本已经存进去的重复键位：打开设置要能查出来并标红 ----
+    store.updateSettings {
+        $0.setShortcut(KeyCombo(.character("k"), .command), for: .openFile)
+        $0.setShortcut(KeyCombo(.character("k"), .command), for: .showLibrary)
+    }
+    delegate.debugSettingsSync()
+    check(delegate.debugSettingsDuplicateActions.count == 2,
+          "★ 已保存的重复键位会被检测出来",
+          delegate.debugSettingsDuplicateActions.map(\.title).joined(separator: "、"))
+    check(delegate.debugSettingsHintVisible && delegate.debugSettingsHintText.contains("重复"),
+          "★ 底部提示写明重复的键位", delegate.debugSettingsHintText)
+    check(delegate.debugSettingsBorderIsRed(.openFile) && delegate.debugSettingsBorderIsRed(.showLibrary),
+          "重复的两行标红")
+    delegate.debugSettingsResetAllShortcuts()
+    delegate.debugSettingsSync()
+    check(delegate.debugSettingsDuplicateActions.isEmpty && !delegate.debugSettingsHintVisible,
+          "全部还原后重复提示消失")
+    delegate.debugApplyShortcuts()
+
+    // ---- 6.7) 连续两次冲突 + 两次交换：回到默认后两个「还原」都该是灰的 ----
+    delegate.debugSettingsResetAllShortcuts()
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("l"), .command), for: .openFile)
+    delegate.debugSettingsSwapConflict()
+    check(store.settings.shortcut(.openFile)?.display == "command + L"
+          && store.settings.shortcut(.showLibrary)?.display == "command + O",
+          "第一次交换后是 command + L / command + O")
+    check(delegate.debugSettingsResetButtonEnabled(.openFile)
+          && delegate.debugSettingsResetButtonEnabled(.showLibrary),
+          "第一次交换后两边都算「改过」（还原可用）")
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("o"), .command), for: .openFile)
+    delegate.debugSettingsSwapConflict()
+    check(store.settings.shortcut(.openFile)?.display == "command + O"
+          && store.settings.shortcut(.showLibrary)?.display == "command + L",
+          "★ 第二次交换后两个都回到默认")
+    check(delegate.debugSettingsOverriddenActions.isEmpty,
+          "★ 回到默认后没有任何「改过」标记")
+    check(!delegate.debugSettingsResetButtonEnabled(.openFile)
+          && !delegate.debugSettingsResetButtonEnabled(.showLibrary),
+          "★ 两个「还原」按钮都是灰的")
+    // 旧存档可能留下「等于默认值」的冗余覆盖 —— 也不能点亮还原按钮
+    store.updateSettings {
+        $0.shortcutOverrides[ShortcutAction.openFile.rawValue] =
+            ShortcutAction.openFile.defaultCombo.stored
+    }
+    delegate.debugSettingsSync()
+    check(!delegate.debugSettingsResetButtonEnabled(.openFile),
+          "★ 旧存档的冗余覆盖不点亮「还原」按钮")
+    delegate.debugSettingsResetAllShortcuts()
+
+    // 带着未确认的冲突关掉设置页：重开必须显示真实生效值（不能看起来像是设了）
+    delegate.debugSettingsSetShortcut(KeyCombo(.character("l"), .command), for: .openFile)
+    check(delegate.debugSettingsConflictVisible, "关窗前确实有未确认的冲突")
+    delegate.debugCloseSettingsWindow()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    delegate.showSettings(nil)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    check(delegate.debugSettingsShortcutText(.openFile) == "command + O",
+          "★ 重开设置页后打开文件显示真实生效的 command + O（不再静默还原）",
+          delegate.debugSettingsShortcutText(.openFile))
+    check(!delegate.debugSettingsConflictVisible, "重开设置页后没有残留的冲突提示")
+    check(store.settings.shortcut(.openFile)?.display == "command + O",
+          "重开设置页后存档里仍是 command + O")
+
+    // 非法键提示：Esc / 点别处取消录制后必须一起消失（固定在底部后残留会很显眼）
+    delegate.debugSettingsShowMessage("字母、数字、符号要搭配至少一个修饰键")
+    check(delegate.debugSettingsHintVisible, "非法键提示可见")
+    delegate.debugSettingsEndRecording()
+    check(!delegate.debugSettingsHintVisible, "★ 取消录制后非法键提示一起消失")
+
+    // 程序化关窗（自检 / 别的入口）时，进行中的录制监听必须被收掉，
+    // 否则窗口关了按键还会改到隐藏的录制器。
+    delegate.debugSettingsBeginRecording(.showFind)
+    check(delegate.debugSettingsIsRecording(.showFind), "自检：录制器真的进入了录制态")
+    delegate.debugCloseSettingsWindow()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    check(!delegate.debugSettingsIsRecording(.showFind), "★ 关窗会取消进行中的录制监听")
+    delegate.showSettings(nil)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+
+    delegate.debugSettingsResetAllShortcuts()
+    delegate.debugApplyShortcuts()
     delegate.debugCloseAuxWindows()
     RunLoop.current.run(until: Date().addingTimeInterval(0.2))
 

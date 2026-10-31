@@ -76,7 +76,7 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         window.minSize = NSSize(width: 380, height: 300)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        if !window.setFrameAutosaveName("ReaderFindWindowFrame") { window.center() }
+        if !DevTools.applyFrameAutosaveName(window, "ReaderFindWindowFrame") { window.center() }
 
         let content = NSView(frame: rect)
         content.autoresizingMask = [.width, .height]
@@ -190,8 +190,9 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
         caseCheck.state = caseSensitive ? .on : .off
         resetSearchState()
 
-        NSApp.activate(ignoringOtherApps: true)
+        DevTools.activate()
         window.makeKeyAndOrderFront(nil)
+        DevTools.park(window)
         window.makeFirstResponder(searchField)
         searchField.selectText(nil)
     }

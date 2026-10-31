@@ -35,13 +35,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     // 快捷键页
     private var shortcutRecorders: [ShortcutAction: ShortcutRecorderView] = [:]
     private var shortcutResetButtons: [ShortcutAction: NSButton] = [:]
-    private var shortcutConflictBanner: NSStackView!
-    private var shortcutConflictLabel: NSTextField!
-    private var shortcutMessageLabel: NSTextField!
-    /// 待确认的冲突：用户想给 action 设 combo，但被 other 占着
-    private var pendingConflict: (action: ShortcutAction, combo: KeyCombo, other: ShortcutAction)?
-    private var shortcutConflictRow: NSGridRow?
-    private var shortcutMessageRow: NSGridRow?
+    /// 冲突 / 非法键提示条：**固定在设置窗口底部**，不放进快捷键页的滚动内容。
+    /// 之前它是网格最后一行，快捷键页很长（21 行 + 5 个分组），提示刚出现就在
+    /// 屏幕外，用户只看到红框、看不到「和谁重复」（bug）。
+    private var shortcutHintBar: NSView!
+    private var shortcutHintLabel: NSTextField!
+    private var shortcutHintSwapButton: NSButton!
+    private var shortcutHintCancelButton: NSButton!
+    private var shortcutHintHeight: NSLayoutConstraint!
+    /// 待确认的冲突来自哪条路径：
+    /// - assign：录制/设置一个新键位撞了；
+    /// - reset：点「还原」后，该功能的默认键位已经被别人占着（用户报的 bug）。
+    private enum ConflictSource { case assign, reset }
+
+    /// 待确认的冲突：用户想给 action 设 combo（或还原成默认 combo），但被 other 占着
+    private var pendingConflict: (action: ShortcutAction, combo: KeyCombo,
+                                  other: ShortcutAction, source: ConflictSource)?
+    /// 提示条现在显示的是不是「已保存的重复键位」提示
+    private var isShowingDuplicateHint = false
     private var alphaSlider: NSSlider!
     private var alphaLabel: NSTextField!
     private var menuBarCheck: NSButton!
@@ -91,6 +102,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     /// 自检用：标签页
+    /// 自检用：安静模式下设置窗口是否被隐藏（alpha = 0，不闪窗）
+    var debugWindowIsInvisible: Bool { window.alphaValue == 0 }
+
     var debugTabTitles: [String] {
         guard let seg = segmented else { return [] }
         return (0..<seg.segmentCount).map { seg.label(forSegment: $0) ?? "" }
@@ -176,7 +190,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: contentWidth, height: 300)
         window.delegate = self
-        if !window.setFrameAutosaveName("ReaderSettingsWindowFrame") { window.center() }
+        if !DevTools.applyFrameAutosaveName(window, "ReaderSettingsWindowFrame") { window.center() }
 
         // 用分段控件当标签栏：NSTabView 在离屏渲染下标签文字画不出来，
         // 而且自绘更容易控制尺寸
@@ -189,16 +203,71 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let container = NSView(frame: .zero)
         container.translatesAutoresizingMaskIntoConstraints = false
 
+        // 底部提示条：快捷键冲突 / 非法键原因都显示在这里，任何标签页都看得见。
+        // 高度在隐藏时收成 0，不占页面空间。
+        shortcutHintBar = NSView(frame: .zero)
+        shortcutHintBar.translatesAutoresizingMaskIntoConstraints = false
+        shortcutHintBar.isHidden = true
+
+        let hintSeparator = NSBox(frame: .zero)
+        hintSeparator.boxType = .separator
+        hintSeparator.translatesAutoresizingMaskIntoConstraints = false
+        shortcutHintBar.addSubview(hintSeparator)
+
+        // 提示可能比较长（「shift + command + S」已被「在访达中显示存档」占用…），
+        // 允许折成两行 —— 截断会把「和谁重复 / 尚未保存」这种关键信息吃掉。
+        shortcutHintLabel = NSTextField(wrappingLabelWithString: "")
+        shortcutHintLabel.font = NSFont.systemFont(ofSize: 11)
+        shortcutHintLabel.textColor = .systemRed
+        shortcutHintLabel.maximumNumberOfLines = 2
+        shortcutHintLabel.lineBreakMode = .byWordWrapping
+        shortcutHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        shortcutHintLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        shortcutHintSwapButton = NSButton(title: "交换", target: self,
+                                          action: #selector(swapConflictClicked))
+        shortcutHintSwapButton.bezelStyle = .rounded
+        shortcutHintSwapButton.controlSize = .small
+        shortcutHintSwapButton.setContentHuggingPriority(.required, for: .horizontal)
+        shortcutHintCancelButton = NSButton(title: "取消", target: self,
+                                            action: #selector(cancelConflictClicked))
+        shortcutHintCancelButton.bezelStyle = .rounded
+        shortcutHintCancelButton.controlSize = .small
+        shortcutHintCancelButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        let hintRow = NSStackView(views: [shortcutHintLabel, shortcutHintSwapButton,
+                                          shortcutHintCancelButton])
+        hintRow.orientation = .horizontal
+        hintRow.alignment = .centerY
+        hintRow.spacing = 8
+        hintRow.translatesAutoresizingMaskIntoConstraints = false
+        shortcutHintBar.addSubview(hintRow)
+
         let root = NSView(frame: NSRect(origin: .zero, size: rect.size))
         root.addSubview(segmented)
         root.addSubview(container)
+        root.addSubview(shortcutHintBar)
+
+        shortcutHintHeight = shortcutHintBar.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             segmented.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
             segmented.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             container.topAnchor.constraint(equalTo: segmented.bottomAnchor, constant: 10),
             container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            container.bottomAnchor.constraint(equalTo: shortcutHintBar.topAnchor, constant: -6),
+
+            shortcutHintBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            shortcutHintBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            shortcutHintBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            shortcutHintHeight,
+
+            hintSeparator.topAnchor.constraint(equalTo: shortcutHintBar.topAnchor),
+            hintSeparator.leadingAnchor.constraint(equalTo: shortcutHintBar.leadingAnchor, constant: 16),
+            hintSeparator.trailingAnchor.constraint(equalTo: shortcutHintBar.trailingAnchor, constant: -16),
+            hintRow.leadingAnchor.constraint(equalTo: shortcutHintBar.leadingAnchor, constant: 20),
+            hintRow.trailingAnchor.constraint(lessThanOrEqualTo: shortcutHintBar.trailingAnchor, constant: -20),
+            hintRow.centerYAnchor.constraint(equalTo: shortcutHintBar.centerYAnchor),
         ])
         window.contentView = root
 
@@ -461,33 +530,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             }
         }
 
-        // 冲突提示条：默认隐藏，有冲突时显示「和谁冲突 + 交换 / 取消」
-        shortcutConflictLabel = NSTextField(labelWithString: "")
-        shortcutConflictLabel.font = NSFont.systemFont(ofSize: 11)
-        shortcutConflictLabel.textColor = .systemRed
-        let swapButton = NSButton(title: "交换",
-                                  target: self, action: #selector(swapConflictClicked))
-        swapButton.bezelStyle = .rounded
-        let cancelButton = NSButton(title: "取消",
-                                    target: self, action: #selector(cancelConflictClicked))
-        cancelButton.bezelStyle = .rounded
-        shortcutConflictBanner = NSStackView(views: [shortcutConflictLabel, swapButton, cancelButton])
-        shortcutConflictBanner.orientation = .horizontal
-        shortcutConflictBanner.spacing = 8
-        let conflictRow = grid.addRow(with: [shortcutConflictBanner])
-        conflictRow.mergeCells(in: NSRange(location: 0, length: 3))
-        conflictRow.isHidden = true
-        shortcutConflictRow = conflictRow
-
-        // 非法键 / 其它提示（录制器拒绝时显示原因，不静默吞掉）
-        shortcutMessageLabel = NSTextField(labelWithString: "")
-        shortcutMessageLabel.font = NSFont.systemFont(ofSize: 11)
-        shortcutMessageLabel.textColor = .systemRed
-        let messageRow = grid.addRow(with: [shortcutMessageLabel])
-        messageRow.mergeCells(in: NSRange(location: 0, length: 3))
-        messageRow.isHidden = true
-        shortcutMessageRow = messageRow
-
+        // 冲突 / 非法键提示都在窗口底部的固定提示条里（`shortcutHintBar`），
+        // 不再放进这个很长的滚动网格 —— 否则提示会在屏幕外，用户只看到红框。
         let resetAll = NSButton(title: "全部还原默认",
                                 target: self, action: #selector(resetAllShortcutsClicked))
         resetAll.bezelStyle = .rounded
@@ -507,13 +551,56 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     /// 刷新快捷键页的显示。设置变化后（含外部改动）都要调。
     func refreshShortcutState() {
+        // 先算「已经保存的」重复键位（待确认的候选不算，它还没落盘）。
+        // 旧版本允许通过「交换后再还原」造出两个同键并存盘，这里要能把它查出来，
+        // 不能再默默显示两行一样的键位。
+        var byCombo: [KeyCombo: [ShortcutAction]] = [:]
+        for action in ShortcutAction.allCases {
+            if let combo = store.settings.shortcut(action) {
+                byCombo[combo, default: []].append(action)
+            }
+        }
+        let duplicates = byCombo.filter { $0.value.count > 1 }
+        var duplicateActions = Set<ShortcutAction>()
+        for (_, actions) in duplicates { duplicateActions.formUnion(actions) }
+
         for action in ShortcutAction.allCases {
             guard let recorder = shortcutRecorders[action] else { continue }
             if pendingConflict?.action == action { continue }   // 别覆盖冲突候选
             recorder.update(store.settings.shortcut(action))
+            recorder.setConflictHighlight(duplicateActions.contains(action))
             shortcutResetButtons[action]?.isEnabled = store.settings.shortcutIsOverridden(action)
         }
         updateShortcutDependentLabels()
+        updateSavedDuplicateHint(duplicates)
+    }
+
+    /// 已经落盘的重复键位：标红 + 底部提示说清楚「哪两行都是哪个键」。
+    /// 待确认冲突优先显示，避免两条提示打架。
+    private func updateSavedDuplicateHint(_ duplicates: [KeyCombo: [ShortcutAction]]) {
+        guard pendingConflict == nil else { return }
+        guard let (combo, actions) = duplicates.first else {
+            if isShowingDuplicateHint {
+                isShowingDuplicateHint = false
+                hideShortcutHint()
+            }
+            return
+        }
+        let names = actions.map(\.title)
+        var text = "重复快捷键：「\(names[0])」和「\(names[1])」都是 \(combo.display)"
+        if names.count > 2 {
+            text = "重复快捷键：「\(names.joined(separator: "」「"))」都是 \(combo.display)"
+        }
+        if duplicates.count > 1 {
+            text += "（共 \(duplicates.count) 处）"
+        }
+        text += "；点「还原」可修复"
+        shortcutHintLabel.stringValue = text
+        shortcutHintLabel.toolTip = "点对应行的「还原」或重新录制来改掉其中一个；「全部还原默认」会清掉所有自定义键位"
+        shortcutHintSwapButton.isHidden = true
+        shortcutHintCancelButton.isHidden = true
+        setShortcutHintVisible(true, height: 44)
+        isShowingDuplicateHint = true
     }
 
     /// 所有引用快捷键的界面文案都从这里刷新 —— 不允许写死（用户改了键位要立刻变）
@@ -533,41 +620,43 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         for (a, recorder) in shortcutRecorders where a != action {
             recorder.cancelRecording()      // 同一时间只允许一个录制器
         }
-        clearConflict()
-        hideShortcutMessage()
+        // 开始录新的键位 = 放弃上一次没确认的冲突。候选值必须换回真实生效值，
+        // 否则那一行会一直显示一个其实没保存的键位（用户看到的「两个 command + L」）。
+        if pendingConflict != nil { clearConflict() }
+        hideShortcutHint()
     }
 
-    /// 录制被取消（Esc / 点别处）：把冲突候选也一起撤销
+    /// 录制被取消（Esc / 点别处）：冲突候选和「非法键」提示都跟着收掉。
+    /// 提示条现在固定在窗口底部，不收的话按 Esc 后它会一直挂在窗口底部。
     private func endRecording() {
         if pendingConflict != nil {
             clearConflict()
-            refreshShortcutState()
+        } else {
+            hideShortcutHint()
         }
     }
 
     private func commitShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
         guard let recorder = shortcutRecorders[action] else { return }
         if let combo {
-            // 冲突：不静默拒绝，也不强行覆盖 —— 弹「交换 / 取消」
+            // 冲突：不静默拒绝，也不强行覆盖 —— 底部固定提示条写明「和谁撞了」+ 交换 / 取消
             if let other = store.settings.conflictingAction(for: combo, excluding: action) {
-                pendingConflict = (action, combo, other)
+                pendingConflict = (action, combo, other, .assign)
+                isShowingDuplicateHint = false
                 recorder.showConflictCandidate(combo)
-                shortcutConflictLabel.stringValue =
-                    "「\(combo.display)」已经被「\(other.title)」占用"
-                shortcutConflictRow?.isHidden = false
+                showConflictHint(combo: combo, action: action, other: other, source: .assign)
                 return
             }
-            hideShortcutMessage()
+            hideShortcutHint()
             apply { $0.setShortcut(combo, for: action) }
             recorder.update(combo)
         } else {
             // Delete：清掉绑定（存空串，与「没改过」区分）
-            hideShortcutMessage()
+            hideShortcutHint()
             apply { $0.setShortcut(nil, for: action) }
             recorder.update(nil)
         }
         clearConflict()
-        refreshShortcutState()
     }
 
     @objc private func swapConflictClicked() {
@@ -575,69 +664,179 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let otherCombo = store.settings.shortcut(pending.other)
         let myCombo = store.settings.shortcut(pending.action)
         apply {
-            $0.setShortcut(otherCombo, for: pending.action)
+            switch pending.source {
+            case .assign:
+                $0.setShortcut(otherCombo, for: pending.action)
+            case .reset:
+                // 「还原」冲突：目标默认值 = pending.combo = other 当前键位，
+                // 交换后 action 回默认，other 拿 action 原来的键位，且不留下多余覆盖。
+                $0.resetShortcut(pending.action)
+            }
             $0.setShortcut(myCombo, for: pending.other)
         }
         clearConflict()
-        refreshShortcutState()
     }
 
     @objc private func cancelConflictClicked() {
         clearConflict()
-        refreshShortcutState()
     }
 
+    /// 撤掉待确认的冲突。**必须同时刷新那一行的显示**：把候选键位换回真实
+    /// 生效值，否则「取消 / 去录别的键 / 切标签页」之后界面会留下两个同键。
     private func clearConflict() {
         pendingConflict = nil
-        shortcutConflictRow?.isHidden = true
-        for recorder in shortcutRecorders.values {
-            recorder.clearConflictHighlight()
-        }
+        hideShortcutHint()
+        refreshShortcutState()
     }
 
     @objc private func resetShortcutClicked(_ sender: NSButton) {
         let all = ShortcutAction.allCases
         guard all.indices.contains(sender.tag) else { return }
-        let action = all[sender.tag]
+        requestReset(all[sender.tag])
+    }
+
+    /// 单个「还原」。⚠️ 不能直接 reset 就存盘：别的功能可能已经被改成
+    /// 这个功能的默认键位（用户报的 bug：交换后还原 → 两个 command + L 并存）。
+    /// 撞了就按冲突处理：先不还原，交给「交换 / 取消」确认。
+    private func requestReset(_ action: ShortcutAction) {
+        if pendingConflict != nil { clearConflict() }
+        let target = action.defaultCombo
+        if let other = store.settings.conflictingAction(for: target, excluding: action) {
+            pendingConflict = (action, target, other, .reset)
+            isShowingDuplicateHint = false
+            // 不把默认值显示进格子（否则界面上又出现两个同键），只标红 + 底部说明
+            shortcutRecorders[action]?.setConflictHighlight(true)
+            showConflictHint(combo: target, action: action, other: other, source: .reset)
+            return
+        }
         apply { $0.resetShortcut(action) }
         clearConflict()
-        refreshShortcutState()
     }
 
     @objc private func resetAllShortcutsClicked() {
         apply { $0.resetAllShortcuts() }
         clearConflict()
-        refreshShortcutState()
     }
 
+    // MARK: - 快捷键：底部提示条
+
+    /// 冲突提示：固定在窗口底部、任何标签页都看得见；写明「和谁撞了」，
+    /// 并说明**还没保存**（用户不会以为已经生效，切页 / 重开也不会莫名回退）。
+    private func showConflictHint(combo: KeyCombo, action: ShortcutAction,
+                                  other: ShortcutAction, source: ConflictSource) {
+        isShowingDuplicateHint = false
+        switch source {
+        case .assign:
+            shortcutHintLabel.stringValue =
+                "「\(combo.display)」已被「\(other.title)」占用，尚未保存"
+        case .reset:
+            shortcutHintLabel.stringValue =
+                "还原后会用「\(combo.display)」，但它已被「\(other.title)」占用，尚未保存"
+        }
+        shortcutHintLabel.toolTip = "交换后：「\(other.title)」会改用「\(action.title)」现在的键位"
+        shortcutHintSwapButton.isHidden = false
+        shortcutHintCancelButton.isHidden = false
+        shortcutHintSwapButton.toolTip =
+            "把「\(other.title)」改成「\(action.title)」现在的键位"
+        setShortcutHintVisible(true, height: 44)   // 两行：长功能名 / 长组合都放得下
+    }
+
+    /// 非法键 / 其它录制失败的提示（复用同一条底部提示条，不再藏在滚动区底部）
     private func showShortcutMessage(_ message: String) {
-        shortcutMessageLabel.stringValue = message
-        shortcutMessageRow?.isHidden = false
+        isShowingDuplicateHint = false
+        shortcutHintLabel.stringValue = message
+        shortcutHintLabel.toolTip = message
+        shortcutHintSwapButton.isHidden = true
+        shortcutHintCancelButton.isHidden = true
+        setShortcutHintVisible(true, height: 30)
     }
 
-    private func hideShortcutMessage() {
-        shortcutMessageRow?.isHidden = true
+    private func hideShortcutHint() {
+        isShowingDuplicateHint = false
+        setShortcutHintVisible(false, height: 0)
+    }
+
+    private func setShortcutHintVisible(_ visible: Bool, height: CGFloat) {
+        shortcutHintBar.isHidden = !visible
+        shortcutHintHeight.constant = height
+        if !visible {
+            shortcutHintLabel.toolTip = nil
+            shortcutHintSwapButton.toolTip = nil
+        }
     }
 
     // 自检用
-    var debugConflictVisible: Bool { !(shortcutConflictRow?.isHidden ?? true) }
+    var debugConflictVisible: Bool { !shortcutHintBar.isHidden && pendingConflict != nil }
+    var debugConflictedActions: [ShortcutAction] {
+        shortcutRecorders.filter { $0.value.isConflicted }.map(\.key).sorted { $0.rawValue < $1.rawValue }
+    }
+    /// 冲突提示条是否**真的**在窗口可见范围内（转坐标后与 contentView 相交），
+    /// 而不是只检查 isHidden / 高度 —— 否则断言是空的。
+    var debugConflictBannerOnScreen: Bool {
+        guard let bar = shortcutHintBar, let content = window?.contentView,
+              bar.window != nil, window?.isVisible == true,
+              !bar.isHidden, shortcutHintHeight.constant > 0 else { return false }
+        content.layoutSubtreeIfNeeded()
+        guard !bar.hasAmbiguousLayout else { return false }
+        let rect = bar.convert(bar.bounds, to: content)
+        return rect.height > 0 && rect.intersects(content.bounds)
+    }
+    var debugShortcutHintText: String { shortcutHintLabel.stringValue }
+    var debugShortcutHintVisible: Bool { !shortcutHintBar.isHidden }
+    func debugShowShortcutMessage(_ message: String) { showShortcutMessage(message) }
+    func debugEndRecording() { endRecording() }
+    func debugIsRecording(_ action: ShortcutAction) -> Bool {
+        shortcutRecorders[action]?.isRecording ?? false
+    }
+    /// 模拟用户切到别的设置页再切回快捷键页（走真实的 segmented → showPage 路径）
+    func debugSwitchTabAwayAndBack() {
+        guard pageViews.count > 4 else { return }
+        debugSelectTab(0)
+        debugSelectTab(4)
+    }
     var debugPendingConflictOther: ShortcutAction? { pendingConflict?.other }
+    var debugPendingConflictIsReset: Bool { pendingConflict?.source == .reset }
+    /// 当前**已保存**的重复键位（不含待确认候选）
+    var debugSavedDuplicateActions: [ShortcutAction] {
+        var byCombo: [KeyCombo: [ShortcutAction]] = [:]
+        for action in ShortcutAction.allCases {
+            if let combo = store.settings.shortcut(action) {
+                byCombo[combo, default: []].append(action)
+            }
+        }
+        return byCombo.values.filter { $0.count > 1 }.flatMap { $0 }
+            .sorted { $0.rawValue < $1.rawValue }
+    }
+    func debugShortcutBorderIsRed(_ action: ShortcutAction) -> Bool {
+        shortcutRecorders[action]?.debugBorderIsRed ?? false
+    }
+    func debugResetButtonIsEnabled(_ action: ShortcutAction) -> Bool {
+        shortcutResetButtons[action]?.isEnabled ?? false
+    }
+    var debugOverriddenActions: [ShortcutAction] {
+        ShortcutAction.allCases.filter { store.settings.shortcutIsOverridden($0) }
+    }
     func debugShortcutText(_ action: ShortcutAction) -> String {
         shortcutRecorders[action]?.currentDisplayText ?? ""
     }
     func debugSetShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
         commitShortcut(combo, for: action)
     }
-    func debugSwapConflict() { swapConflictClicked() }
-    func debugResetShortcut(_ action: ShortcutAction) {
-        apply { $0.resetShortcut(action) }
-        clearConflict()
-        refreshShortcutState()
+    /// 走录制器真实入口：ShortcutRecorderView.beginRecording → onBegin → 控制器 beginRecording
+    func debugBeginRecording(_ action: ShortcutAction) {
+        shortcutRecorders[action]?.beginRecording()
     }
+    func debugCancelRecording(_ action: ShortcutAction) {
+        shortcutRecorders[action]?.cancelRecording()
+    }
+    func debugSwapConflict() { swapConflictClicked() }
+    func debugCancelConflict() { cancelConflictClicked() }
+    func debugResetShortcut(_ action: ShortcutAction) { requestReset(action) }
+    /// 自检用：模拟窗口重新激活 / 外部设置变化后的整页刷新
+    func debugSync() { syncFromSettings() }
     func debugResetAllShortcuts() {
         apply { $0.resetAllShortcuts() }
         clearConflict()
-        refreshShortcutState()
     }
 
     private func buildPageTab() -> (NSScrollView, NSSize) {
@@ -1271,12 +1470,28 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         syncFromSettings()
-        NSApp.activate(ignoringOtherApps: true)
+        DevTools.activate()
         window.makeKeyAndOrderFront(nil)
+        DevTools.park(window)
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
         syncFromSettings()
+    }
+
+    /// 关窗 = 放弃还没确认的冲突。下次打开必须显示真实生效值，
+    /// 不能留下一个「看起来设了、其实没保存」的候选键位（bug：重开自动还原）。
+    func windowWillClose(_ notification: Notification) {
+        // 程序化关窗（自检 / 未来别的 performClose 入口）时，录制器的本地事件监听
+        // 可能还挂着 —— 先收掉，否则窗口关了按键还会改到隐藏的录制器。
+        for recorder in shortcutRecorders.values {
+            recorder.cancelRecording()
+        }
+        if pendingConflict != nil {
+            clearConflict()
+        } else {
+            hideShortcutHint()
+        }
     }
 }
 

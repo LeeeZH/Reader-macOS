@@ -318,11 +318,22 @@ struct ReaderSettings {
         set("macos_always_on_top", .int(keepOnTop ? 1 : 0))
         // 自定义快捷键：只写覆盖项，按 id 排序保证输出稳定（便于 diff / 排查）。
         // 没有任何覆盖时不写这个键 —— 老用户 / Windows 存档的文件里不会平白多出一行。
-        if shortcutOverrides.isEmpty {
+        // 另外把「等于默认值」的冗余覆盖清掉：旧版本连续交换会留下这种条目，
+        // 存着会让「还原」按钮莫名亮着、点了又没变化。
+        var effectiveOverrides: [String: String] = [:]
+        for (key, raw) in shortcutOverrides {
+            if let action = ShortcutAction(rawValue: key),
+               let combo = KeyCombo(stored: raw),
+               combo == action.defaultCombo {
+                continue
+            }
+            effectiveOverrides[key] = raw
+        }
+        if effectiveOverrides.isEmpty {
             header.removeValue(forKey: "macos_shortcuts")
         } else {
-            set("macos_shortcuts", .object(shortcutOverrides.keys.sorted().map {
-                ($0, .string(shortcutOverrides[$0] ?? ""))
+            set("macos_shortcuts", .object(effectiveOverrides.keys.sorted().map {
+                ($0, .string(effectiveOverrides[$0] ?? ""))
             }))
         }
         // 反向推导回原版字段，保证 Windows 版读到的行为别太离谱
@@ -395,11 +406,24 @@ struct ReaderSettings {
 
     /// 这个功能是否被用户改过（设置页据此决定「还原」按钮是否可用）
     func shortcutIsOverridden(_ action: ShortcutAction) -> Bool {
-        shortcutOverrides[action.rawValue] != nil
+        guard let raw = shortcutOverrides[action.rawValue] else { return false }
+        // 空串 = 用户主动清掉绑定，算改过
+        guard let combo = KeyCombo(stored: raw) else { return true }
+        // 旧版本可能把「等于默认值」的覆盖写进了存档（连续交换的遗留），
+        // 生效键位和默认一样，不该再让「还原」按钮亮着。
+        return combo != action.defaultCombo
     }
 
     /// 设置快捷键。`nil` 表示清掉绑定（存空串，和「没改过」区分开）。
+    ///
+    /// ⚠️ 设成默认值等于「没改过」：直接删覆盖项。
+    /// 否则连续「冲突 → 交换」后两个键位虽然都回到了默认，存档里却留着两个
+    /// 和默认一模一样的覆盖，「还原」按钮会亮着、点了还没有任何变化（用户反馈）。
     mutating func setShortcut(_ combo: KeyCombo?, for action: ShortcutAction) {
+        if let combo, combo == action.defaultCombo {
+            shortcutOverrides.removeValue(forKey: action.rawValue)
+            return
+        }
         shortcutOverrides[action.rawValue] = combo?.stored ?? ""
     }
 

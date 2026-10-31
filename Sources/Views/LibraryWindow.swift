@@ -56,7 +56,7 @@ final class LibraryWindowController: NSObject, NSTableViewDataSource, NSTableVie
         window.isReleasedWhenClosed = false
         window.delegate = self
         // 让系统帮忙记住尺寸与位置（阅读列表是 macOS 独有的窗口，用 UserDefaults 即可）
-        if !window.setFrameAutosaveName("ReaderLibraryWindowFrame") {
+        if !DevTools.applyFrameAutosaveName(window, "ReaderLibraryWindowFrame") {
             window.center()
         }
 
@@ -125,8 +125,9 @@ final class LibraryWindowController: NSObject, NSTableViewDataSource, NSTableVie
         reload()
         // ⚠️ 顺序很重要：先激活 App，再 makeKeyAndOrderFront。
         // 反过来的话窗口可能不是 key window，红绿灯按钮第一次点击只会激活窗口而不关闭。
-        NSApp.activate(ignoringOtherApps: true)
+        DevTools.activate()
         window.makeKeyAndOrderFront(nil)
+        DevTools.park(window)
         scheduleBackgroundWork()
     }
 
