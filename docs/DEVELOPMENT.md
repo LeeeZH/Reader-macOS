@@ -71,6 +71,8 @@ $B --dark --render-page 书.txt /tmp/dark.png 0   # 深色模式预览
 $B --render-page 书.txt /tmp/find.png 0 --find 之  # 正文搜索高亮预览
 $B --render-page 书.txt /tmp/mid.png 0 220       # 第 5 个参数 = 平滑滚动像素偏移
                                                   # （用来检查下一页有没有严丝合缝接上）
+$B --render-page 书.txt /tmp/title.png 0 --title-font "Songti SC" --title-size 26
+                                                  # 章节标题独立字体预览（= 关掉「同字体」）
 ```
 
 **导出分页表（parity / 回归用）**：
@@ -85,7 +87,9 @@ $B --dump-pages samples/古文观止.txt 420 660
 
 这是方案里 R2 风险（CoreText 行高与 GDI `sz.cy` 不等 → 每页行数与原版不同）
 唯一可靠的验证手段：拿同一本书在两个平台各导一份，逐页比对
-`start` 和 `lines` 两列即可。`samples/golden-pages.tsv` 是当前实现的基准快照。
+`start` 和 `lines` 两列即可。`samples/golden-pages.tsv` 是当前实现的基准快照，
+`./verify.sh` 的 4.12 步会自动和它逐字节 diff —— **任何排版改动**（字体、行距、边距、
+标题字体）都必须保持默认设置下这份快照不变，否则老用户的阅读位置会整体错位。
 
 **关窗自检**（复现「点关闭按钮后意外退出」）：
 
@@ -156,11 +160,21 @@ $B --always-on-top-selftest
 # 退出码 0 表示全部通过。
 ```
 
-**一键验证**（改动完跑一遍）：
+**一键验证**（**打包 / 发版前**跑一遍）：
 
 ```bash
-./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 窗口置顶自检 → 离屏渲染
+./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 窗口置顶自检 → 章节/分页 golden 比对 → 离屏渲染
 ```
+
+> ⏱️ **不要每改一行就全量跑。** `verify.sh` 要构建 + 起 7 个自检进程 + 渲染 8 张图，
+> 单次几十秒到一分多钟；日常迭代只跑被改到的那一小块：
+>
+> - 只动核心逻辑（解码 / 章节 / 设置 / 搜索）→ `./test.sh`
+> - 只动某个窗口/交互 → 对应自检，例如 `$B --find-selftest`、`$B --toc-selftest`
+> - 只动排版/渲染 → 直接离屏渲染看图 + `$B --dump-pages` 和 golden 比一下
+>
+> 留到「准备打包」那一刻，全量跑一次 `./verify.sh`，把这一批改动可能碰坏的东西
+> 一次性暴露出来，再集中改 bug。
 
 ### VSCode
 
@@ -218,6 +232,7 @@ $B --always-on-top-selftest
 - [x] **深色模式**：默认跟随系统外观；一旦自定义颜色就自动改用自定义值
 - [x] **书签面板** `⌘B`：列出当前书的书签（章节名 + 位置），可跳转 / 删除 / 全部清除
 - [x] **窗口透明**：背景可调不透明度（10%~100%），**文字始终不透明**（比原版连字一起透明更易读）
+- [x] **章节标题独立字体 / 颜色**（原版 `use_same_font` / `font_title` / `font_color_title`）：关掉「与正文同字体」后标题段落用自己的字体、字号、颜色（含折行续行）；默认同字体同色，分页基准不变。设置 → 显示 → 章节标题
 - [x] **窗口置顶**：`NSWindow.level = .floating` + 失焦不隐藏（`macos_always_on_top`），浮在其它应用的普通 / 最大化窗口之上；**不进**别人的原生全屏 Space（见设计决策 9）。开关联动：菜单「视图 → 窗口置顶」（`⌃⌘T`）、菜单栏图标菜单、设置 → 窗口
 - [x] **全局热键** `⌃⌥H`：一键隐藏 / 显示窗口（对应原版 Alt+H 的「老板键」）
 - [x] **菜单栏图标**：显示/隐藏、打开文件、阅读列表、自动翻页、窗口置顶、沉浸阅读、设置、退出
@@ -249,8 +264,7 @@ $B --always-on-top-selftest
 
 尚未实现（进度与顺序看 [路线图](ROADMAP.md)，这里只列结论）：
 
-- [ ] **章节标题独立字体/颜色**（`use_same_font` / `font_title` / `title_color`：字段已能读写，渲染层还没做双字体）
-- [ ] 背景图片（拉伸/平铺/平铺翻转）、无边框窗口
+- [ ] 背景图片（拉伸/平铺/平铺翻转）
 - [ ] 在线书源（需要先改「完全离线」的产品承诺）、EPUB（需要先做书籍抽象 + 零依赖 ZIP，MOBI 放弃）
 
 ---
@@ -614,6 +628,8 @@ READER_CACHE_PATH=/任意/位置/cache.dat ./run.sh
 | 拖字距 / 行距 / 段距滑块时正文变了，设置里的数字不变 | `addSliderRow` 创建的数值标签是**局部变量**：`spacingChanged` 只把值写进设置并重排阅读界面，没有任何人再去更新那几个 `NSTextField`。修复：用 `sliderValueLabels` 登记滑块和标签，拖动时统一刷新；`syncFromSettings` 里也刷一次（否则重开设置窗口显示的还是初始值） |
 | 设置窗口里每一项改起来都很卡，长篇小说尤其明显 | 设置里的滑块是 `isContinuous`，每拖一下都会走 `applySettingsToReader()`，而它**无条件**执行 `book.chapterRule = s.chapterRule` —— `chapterRule` 的 `didSet` 会把全书章节重新解析一遍。6.4M 个 UTF-16 码元实测约 **1.3 秒/次**，所以拖字号、行距全在等解析。修复：`ChapterRule` 改为 `Equatable`，`TextBook.applyChapterRule()` 只在规则真的变化时才重解析；打开书时也跳过与默认值相同的重复解析 |
 | 打开 47.7MB 小说要白屏卡 2.5 秒（用户反馈） | 两处叠加：① 解码/规范化/章节解析全在主线程同步跑；② `parseDefault` 逐字符调 `u("第")` = `Array(s.utf16)[0]`，每字符 2~3 次堆分配，16M 码元约几千万次，单这一项就占 2.2 秒。修复：字符改字面量常量 + 候选行查表快筛（章节表逐字节不变），再把整条打开流水线放后台并显示转圈。详见「打开一本书」一节 |
+| 长标题换页时，标题行突然掉回正文字体（M3 自测没抓到，code review 抓到） | 第一版把「当前段落是不是标题」写成 `var paragraphIsTitle = false`，只在**段落开头**重新判断。但原版 `is_title = IsChapter(start)`（Page.cpp:737）里的 `Book::IsChapter` 是**区间判定** `idx ∈ [ch.index, ch.index + title_len)`（Book.cpp:260-268），所以一页从长标题中间开始时（翻页 / 翻页重叠行 / 跳转到标题内偏移 / 平滑滚动的下一页），原版续行仍是标题。修复：初值改成 `book.isChapterTitle(at: 页首偏移)`。回归测试见 `[26] 26.8`（造一个跨页长标题，断言第 2 页续行样式仍是 `.title`） |
+| 存档里缺 `font_title` 时，存一次盘就把 Windows 版的字体写成空 LOGFONT | `apply` 里写的是 `if case .object(var lf) = header["font_title"] ?? .object([])`：`??` 的兜底是个**空对象**，所以缺键时它照样匹配、循环一遍什么都不改，最后把 `{}` 写进 header。`CacheCodec.decode` 不补齐缺键（只有写盘时 `normalizedHeader` 按顺序补），于是 Windows 版读到 `lfHeight` / `lfFaceName` 全为 0 的字体 → 字体没了。修复：`writeFont()` 在缺键 / 空对象时退回 `CacheSchema.defaultHeader()` 里的默认 LOGFONT，正文和标题共用这一条路径 |
 
 ---
 
@@ -856,8 +872,9 @@ SHA256 见本页 `SHA256SUMS.txt`
 这里只留几条「工程上还要持续补」的：
 
 1. **parity 测试**：用原版导出同一批 TXT 的「章节列表 + 每页首字符偏移」，
-   逐页比对。`samples/golden-pages.tsv` 是当前的基准快照；
-   分页相关的改动（例如章节标题独立字体）之后必须重新导出并核对。
+   逐页比对。`samples/golden-pages.tsv` 是当前的基准快照，`verify.sh` 的 4.12 步
+   已经自动 diff；分页相关的改动跑一遍就知道有没有动到基准。真的需要换基准时
+   （比如以后故意调整默认行距），要单独提交一份新的 golden 并写清原因。
 2. **新功能都要有对应的 `--xxx-selftest`**：`verify.sh` 里每一步都对应一个
    曾经真出过问题的路径（关窗、启动前打开、目录截断、面板自己关、高亮串色）。
    只加实现不加自检，下一个改这块的人会重新踩一遍。
