@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var settingsWindow: SettingsWindowController?
     private var bookmarkWindow: BookmarkWindowController?
     private var chapterSearchWindow: ChapterSearchWindowController?
+    private var findWindow: FindWindowController?
     private let statusItemController = StatusItemController()
     private var globalHotKey: GlobalHotKey?
     private var autoPageTimer: Timer?
@@ -266,6 +267,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             libraryWindow?.reload()
             bookmarkWindow?.update(book: book)
             chapterSearchWindow?.update(book: book, currentOffset: readingView.pageStart)
+            // 换书了：查找结果按旧书的偏移算的，全部作废（查询词保留）
+            findWindow?.update(book: book)
             window.makeFirstResponder(readingView)
 
             if settings.didFallbackFont {
@@ -290,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         readingView.book = nil
         bookmarkWindow?.update(book: nil)
         chapterSearchWindow?.update(book: nil, currentOffset: 0)
+        findWindow?.update(book: nil)
         currentBookPath = nil
         window.title = "Reader"
     }
@@ -657,6 +661,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         chapterSearchWindow?.show(book: book, currentOffset: readingView.pageStart)
     }
 
+    // MARK: - 全文搜索（⌘F / ⌘G / ⇧⌘G）
+
+    /// 「查找…」（⌘F）：全文搜索面板。
+    ///
+    /// 交互约定（用户提过两次，别再改回去）：
+    ///   · 打开面板永远是**空白**的一次查找 —— 不带上次的查询词；
+    ///   · 搜到结果只列出来，**不会自动跳页**；跳转要用户双击 / 回车 / 点「跳转」。
+    ///
+    /// 编辑模式下把 ⌘F 让给 NSTextView 自己的查找面板：那时光标在文本框里，
+    /// 而且正文可能已经改过 —— 按旧偏移跳转只会落到错误的位置。
+    @objc func showFind(_ sender: Any?) {
+        if let tv = editorTextView {
+            let item = NSMenuItem()
+            item.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+            window.makeFirstResponder(tv)
+            tv.performTextFinderAction(item)
+            return
+        }
+        guard let book = readingView.book else {
+            NSSound.beep()
+            statusLabel.stringValue = "先打开一本书再查找（⌘O）"
+            return
+        }
+        ensureFindWindow()
+        findWindow?.show(book: book, currentOffset: readingView.pageStart,
+                         caseSensitive: library.settings.findCaseSensitive)
+    }
+
+    /// 「查找下一个」（⌘G）：面板开着就在结果里往下走并跳过去；
+    /// 面板没开时只打开一个空白面板（关掉面板 = 本次查找结束，不记查询词）。
+    @objc func findNext(_ sender: Any?) {
+        guard let book = readingView.book else {
+            NSSound.beep()
+            statusLabel.stringValue = "先打开一本书再查找（⌘O）"
+            return
+        }
+        ensureFindWindow()
+        if findWindow?.window.isVisible == true {
+            findWindow?.nextHit()
+            return
+        }
+        findWindow?.show(book: book, currentOffset: readingView.pageStart,
+                         caseSensitive: library.settings.findCaseSensitive)
+    }
+
+    /// 「查找上一个」（⇧⌘G）：同上，方向相反。
+    @objc func findPrevious(_ sender: Any?) {
+        guard let book = readingView.book else {
+            NSSound.beep()
+            statusLabel.stringValue = "先打开一本书再查找（⌘O）"
+            return
+        }
+        ensureFindWindow()
+        if findWindow?.window.isVisible == true {
+            findWindow?.previousHit()
+            return
+        }
+        findWindow?.show(book: book, currentOffset: readingView.pageStart,
+                         caseSensitive: library.settings.findCaseSensitive)
+    }
+
+    /// 懒创建「查找」面板并接好回调（和章节搜索面板同一套写法）。
+    private func ensureFindWindow() {
+        guard findWindow == nil else { return }
+        let wc = FindWindowController()
+        // 只有用户主动跳转（双击 / 回车 / 「跳转」/ ⌘G）才会走到这里
+        wc.onJump = { [weak self] offset, hitIndex in
+            guard let self else { return }
+            self.readingView.jump(to: offset)
+            // 焦点还给阅读视图：否则方向键 / 空格会被结果表格吃掉，翻不了页
+            self.window.makeKeyAndOrderFront(nil)
+            self.window.makeFirstResponder(self.readingView)
+            let total = self.findWindow?.hitCount ?? 0
+            if total > 0 {
+                self.statusLabel.stringValue =
+                    "第 \(max(0, hitIndex) + 1) / \(total) 处（⌘G 下一个，⇧⌘G 上一个）"
+            }
+        }
+        wc.onHighlight = { [weak self] hits, current in
+            guard let self else { return }
+            let ranges = hits.map { $0.index..<($0.index + $0.length) }
+            let currentRange: Range<Int>? =
+                (current >= 0 && current < ranges.count) ? ranges[current] : nil
+            self.readingView.setSearchHighlights(ranges, current: currentRange)
+        }
+        wc.onClose = { [weak self] in
+            guard let self else { return }
+            self.readingView.clearSearchHighlights()
+            self.window.makeFirstResponder(self.readingView)
+        }
+        wc.onCaseSensitiveChange = { [weak self] on in
+            self?.library.updateSettings { $0.findCaseSensitive = on }
+        }
+        findWindow = wc
+    }
+
     // MARK: - 显示设置
 
     @objc func showSettings(_ sender: Any?) {
@@ -753,6 +853,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             book.applyChapterRule(s.chapterRule)
             // 章节表变了，搜索面板要同步（没显示时只记下来）
             chapterSearchWindow?.update(book: book, currentOffset: readingView.pageStart)
+            // 全文搜索命中里的「第几章」也是按旧章节表算的
+            findWindow?.update(book: book)
         }
         readingView.settings = s
     }
@@ -1024,6 +1126,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let marks = NSMenuItem(title: "书签…", action: #selector(showBookmarks(_:)), keyEquivalent: "b")
         marks.target = self
         readMenu.addItem(marks)
+        readMenu.addItem(.separator())
+
+        // 全文搜索：⌘F 是 macOS 上「查找」的约定键位，全屏让给 ⌃⌘F
+        // （系统自带的「进入全屏幕」也是 ⌃⌘F，肌肉记忆一致）。
+        // 老版本把 ⌘F 用作全屏，README 里还专门为这件事写了道歉 —— 这次一并修掉。
+        let find = NSMenuItem(title: "查找…", action: #selector(showFind(_:)), keyEquivalent: "f")
+        find.target = self
+        readMenu.addItem(find)
+        let findNextItem = NSMenuItem(title: "查找下一个",
+                                      action: #selector(findNext(_:)), keyEquivalent: "g")
+        findNextItem.target = self
+        readMenu.addItem(findNextItem)
+        let findPrevItem = NSMenuItem(title: "查找上一个",
+                                      action: #selector(findPrevious(_:)), keyEquivalent: "g")
+        findPrevItem.keyEquivalentModifierMask = [.command, .shift]
+        findPrevItem.target = self
+        readMenu.addItem(findPrevItem)
+        readMenu.addItem(.separator())
 
         let zoomIn = NSMenuItem(title: "放大字号", action: #selector(menuFontLarger(_:)), keyEquivalent: "=")
         zoomIn.target = self
@@ -1057,8 +1177,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                    keyEquivalent: "")
         viewMenu.addItem(customize)
         viewMenu.addItem(.separator())
-        viewMenu.addItem(withTitle: "进入全屏幕",
-                         action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        // ⌘F 已经给「查找」了（macOS 的通用约定），全屏沿用系统标准的 ⌃⌘F
+        let fullScreen = NSMenuItem(title: "进入全屏幕",
+                                    action: #selector(NSWindow.toggleFullScreen(_:)),
+                                    keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.command, .control]
+        viewMenu.addItem(fullScreen)
         viewItem.submenu = viewMenu
 
         // --- 窗口 ---
@@ -1164,6 +1288,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if menuItem.action == #selector(jumpToChapter(_:)) {
             return readingView?.book != nil
         }
+        if menuItem.action == #selector(showFind(_:))
+            || menuItem.action == #selector(findNext(_:))
+            || menuItem.action == #selector(findPrevious(_:)) {
+            // 没打开书时禁用：点了也不会有结果，只会让状态栏弹一句提示
+            return readingView?.book != nil
+        }
         return true
     }
 
@@ -1204,4 +1334,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// 自检用：等价于点菜单「跳转到章节…」（顺带验证菜单动作接线）
     func debugShowChapterSearch() { showChapterSearch(nil) }
+
+    // MARK: 自检探针（全文搜索）
+
+    /// 自检用：查找面板是否可见
+    var debugFindVisible: Bool { findWindow?.window.isVisible ?? false }
+    /// 自检用：查找面板（直接驱动搜索框 / 结果表）
+    var debugFindWindow: FindWindowController? { findWindow }
+    /// 自检用：等价于点菜单「查找…」
+    func debugShowFind() { showFind(nil) }
+    /// 自检用：等价于点菜单「查找下一个」/「查找上一个」
+    func debugFindNext() { findNext(nil) }
+    func debugFindPrevious() { findPrevious(nil) }
+    /// 自检用：阅读视图当前页上可见的命中段数量
+    var debugVisibleSearchHitCount: Int { readingView?.debugVisibleSearchHitCount ?? -1 }
+    /// 自检用：当前页上是否画出了「当前命中」
+    var debugHasCurrentSearchHighlight: Bool { readingView?.debugHasCurrentSearchHighlight ?? false }
+    /// 自检用：当前页上可见的命中区间（用来核对它们确实落在本页内）
+    var debugVisibleSearchRanges: [Range<Int>] { readingView?.debugVisibleSearchRanges ?? [] }
+
+    /// 自检用：某个菜单项实际生效的快捷键（含修饰键，如 "⌃⌘f"）
+    func debugShortcut(menuTitle: String, itemTitle: String) -> String? {
+        guard let item = debugMenuItem(menuTitle: menuTitle, itemTitle: itemTitle) else { return nil }
+        var s = ""
+        if item.keyEquivalentModifierMask.contains(.control) { s += "⌃" }
+        if item.keyEquivalentModifierMask.contains(.option) { s += "⌥" }
+        if item.keyEquivalentModifierMask.contains(.shift) { s += "⇧" }
+        if item.keyEquivalentModifierMask.contains(.command) { s += "⌘" }
+        return s + item.keyEquivalent
+    }
+
+    /// 自检用：按「菜单标题 + 菜单项标题」找菜单项（用来核对快捷键和启用状态）
+    func debugMenuItem(menuTitle: String, itemTitle: String) -> NSMenuItem? {
+        guard let menu = NSApp.mainMenu?.items.first(where: { $0.submenu?.title == menuTitle })?.submenu
+        else { return nil }
+        return menu.items.first { $0.title == itemTitle }
+    }
 }

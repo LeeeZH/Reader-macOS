@@ -53,6 +53,10 @@ struct ReaderSettings {
     /// 沉浸模式：隐藏标题栏（含关闭/最小化/最大化按钮）和底部状态栏
     var hideChrome: Bool = false
 
+    /// 全文搜索是否区分大小写（「查找」面板里的 checkbox）。
+    /// 和上面几个一样存成 header 自定义键 `macos_find_case_sensitive`，Windows 版忽略。
+    var findCaseSensitive: Bool = false
+
     /// 鼠标每个键分别做什么（取代原版 page_mode 的预设）
     enum MouseAction: Int, CaseIterable {
         case none = 0          // 不动作
@@ -132,6 +136,7 @@ struct ReaderSettings {
         menuBarIcon = header["macos_menu_bar"]?.boolValue ?? true
         globalHotKey = header["macos_hotkey"]?.boolValue ?? true
         hideChrome = header["macos_hide_chrome"]?.boolValue ?? false
+        findCaseSensitive = header["macos_find_case_sensitive"]?.boolValue ?? false
         pageMode = header["page_mode"]?.intValue ?? 1
         // 注意这里是「禁用」语义：原版默认 1（禁用），缺省时我们取 0（启用）
         disableBothClickHide = (header["disable_lrhide"]?.intValue ?? 0) != 0
@@ -216,6 +221,7 @@ struct ReaderSettings {
         set("macos_menu_bar", .int(menuBarIcon ? 1 : 0))
         set("macos_hotkey", .int(globalHotKey ? 1 : 0))
         set("macos_hide_chrome", .int(hideChrome ? 1 : 0))
+        set("macos_find_case_sensitive", .int(findCaseSensitive ? 1 : 0))
         // 反向推导回原版字段，保证 Windows 版读到的行为别太离谱
         let winPageMode: Int = (mouseLeftAction == .none && mouseRightAction == .none) ? 0 : 1
         set("page_mode", .int(winPageMode))

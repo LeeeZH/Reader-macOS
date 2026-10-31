@@ -1517,6 +1517,171 @@ spacingWC.debugSetSpacing(charGap: 4, lineGap: 30, paraGap: 20, overlap: 1)
 eq(spacingWC.debugSpacingLabelValues, ["4", "30", "20", "1"],
    "★ 拖动滑块时右侧数字同步更新")
 
+// ============ 24. 全文搜索内核 TextSearch ============
+print("\n[24] 全文搜索内核 TextSearch")
+
+let findBodyText = "第1章 开始\n\n天地玄黄，宇宙洪荒。\nHello World\nhello again\n\n第2章 结束\n\n天地之道，贞观者也。\n"
+let findBook = TextBook(fileURL: tmp.appendingPathComponent("find.txt"),
+                          rawText: findBodyText, encodingName: "UTF-8")
+let findHay = findBook.findText
+
+func hitText(_ h: SearchHit, in haystack: NSString = findHay) -> String {
+    haystack.substring(with: NSRange(location: h.index, length: h.length))
+}
+func ascending(_ hits: [SearchHit]) -> Bool {
+    zip(hits, hits.dropFirst()).allSatisfy { $0.index < $1.index }
+}
+
+// 缓存与偏移口径：findText 的下标必须和 units 一一对应，否则 jump 会落偏
+eq(findBook.findText.length, findBook.units.count, "★ findText 长度 = units 长度（同一套偏移）")
+
+// 基本命中：偏移、长度、原文、升序
+let tianDi = TextSearch.find(query: "天地", haystack: findHay, chapters: findBook.chapters)
+eq(tianDi.hits.count, 2, "「天地」命中 2 处")
+check(tianDi.hits.allSatisfy { hitText($0) == "天地" }, "命中区间切出来就是查询词")
+check(ascending(tianDi.hits), "命中按位置升序")
+check(tianDi.hits.allSatisfy { $0.length == 2 }, "命中长度 = 2 个 UTF-16 码元")
+eq(tianDi.hits.first?.chapterIndex, 0, "第一处在第 1 章")
+eq(tianDi.hits.last?.chapterIndex, 1, "第二处在第 2 章（章节归属正确）")
+
+// 大小写：默认不敏感，可切换成敏感
+let ciUpper = TextSearch.find(query: "HELLO", haystack: findHay, chapters: findBook.chapters)
+eq(ciUpper.hits.count, 2, "默认大小写不敏感：HELLO 命中 2 处")
+eq(ciUpper.hits.map { hitText($0) }, ["Hello", "hello"], "两处分别是 Hello / hello")
+let csUpper = TextSearch.find(query: "HELLO", haystack: findHay,
+                              chapters: findBook.chapters, caseSensitive: true)
+eq(csUpper.hits.count, 0, "区分大小写时 HELLO 不命中")
+let csHello = TextSearch.find(query: "Hello", haystack: findHay,
+                              chapters: findBook.chapters, caseSensitive: true)
+eq(csHello.hits.count, 1, "区分大小写时 Hello 只命中 1 处")
+
+// 非重叠 + 结果上限
+let overlapUnits = units("aaaa")
+let overlap = TextSearch.find(query: "aa", units: overlapUnits)
+eq(overlap.hits.map(\.index), [0, 2], "★ 重叠候选按非重叠处理（aaaa 查 aa = 2 处）")
+let capped = TextSearch.find(query: "ab", units: units("abababab"), limit: 2)
+eq(capped.hits.count, 2, "上限生效时只收前 2 条")
+check(capped.truncated, "还有更多命中时 truncated = true")
+let notCapped = TextSearch.find(query: "ab", units: units("abababab"), limit: 10)
+eq(notCapped.hits.count, 4, "上限足够时全部收下")
+check(!notCapped.truncated, "没有更多命中时 truncated = false")
+let exactLimit = TextSearch.find(query: "ab", units: units("abab"), limit: 2)
+check(!exactLimit.truncated, "命中数正好等于上限且无剩余时不算截断")
+
+// 空查询 / 找不到 / 空书
+eq(TextSearch.find(query: "", units: findBook.units).hits.count, 0, "空查询不返回命中")
+eq(TextSearch.find(query: "找不到的词zzz", units: findBook.units).hits.count, 0, "找不到时为空")
+eq(TextSearch.find(query: "天地", units: []).hits.count, 0, "空文本不会崩")
+eq(TextSearch.find(query: "天地", units: findBook.units, limit: 0).hits.count, 0, "上限为 0 时不做搜索")
+eq(TextSearch.find(query: "天地", units: units("天地")).hits.first?.chapterIndex, 0,
+   "没有章节表时章节归属退回 0")
+
+// 章节归属二分：与 TextBook.chapterIndex 同语义
+eq(TextSearch.chapterIndex(of: tocBook.chapters[599].index, in: tocBook.chapters), 599,
+   "章节二分会命中章节起点本身")
+eq(TextSearch.chapterIndex(of: tocBook.chapters[599].index - 1, in: tocBook.chapters), 598,
+   "章节起点前一个字属于上一章")
+eq(TextSearch.chapterIndex(of: 0, in: []), 0, "空章节表返回 0")
+
+// 前后移动：正常 + 环绕
+eq(TextSearch.firstIndex(atOrAfter: 0, hits: tianDi.hits), 0, "从书首往后找第一条")
+eq(TextSearch.firstIndex(atOrAfter: tianDi.hits[1].index, hits: tianDi.hits), 1,
+   "锚点正好在命中上时含该条")
+eq(TextSearch.firstIndex(atOrAfter: findBook.units.count + 10, hits: tianDi.hits), nil,
+   "锚点超出全文时没有下一条")
+eq(TextSearch.lastIndex(atOrBefore: tianDi.hits[1].index, hits: tianDi.hits), 1,
+   "往回找含锚点上的那一条")
+eq(TextSearch.index(after: 0, hits: tianDi.hits), 1, "下一条")
+eq(TextSearch.index(after: 1, hits: tianDi.hits), 0, "★ 最后一条的下一条环绕到第一条")
+eq(TextSearch.index(before: 0, hits: tianDi.hits), 1, "★ 第一条的上一条环绕到最后一条")
+eq(TextSearch.index(after: 0, hits: tianDi.hits, wrap: false), 1, "不环绕时正常前移")
+eq(TextSearch.index(before: 0, hits: tianDi.hits, wrap: false), nil, "不环绕时第一条没有上一条")
+eq(TextSearch.index(after: 0, hits: []), nil, "空结果集没有下一条")
+
+// 片段：折行、不切代理对
+let excerptSample = "前面一段话\n\n中间目标词后面还有字\n"
+let excerptUnits = units(excerptSample)
+let excerptHit = TextSearch.find(query: "目标词", units: excerptUnits).hits[0]
+check(!excerptHit.excerpt.contains("\n"), "片段里没有换行")
+check(excerptHit.excerpt.contains("目标词"), "片段包含命中词", excerptHit.excerpt)
+let shortExcerpt = TextSearch.excerpt(haystack: String(decoding: excerptUnits, as: UTF16.self) as NSString,
+                                      index: excerptHit.index, length: excerptHit.length, context: 3)
+check(shortExcerpt.contains("…"), "两端被裁掉时带省略号", shortExcerpt)
+check(!shortExcerpt.contains("\n"), "裁剪后的片段也没有换行", shortExcerpt)
+let emojiUnits = units("🙂🙂🙂命中🙂🙂🙂")
+let emojiHit = TextSearch.find(query: "命中", units: emojiUnits).hits[0]
+let emojiExcerpt = TextSearch.excerpt(haystack: String(decoding: emojiUnits, as: UTF16.self) as NSString,
+                                      index: emojiHit.index, length: emojiHit.length, context: 3)
+check(!emojiExcerpt.unicodeScalars.contains { $0.value == 0xFFFD },
+      "★ 片段裁剪不切断代理对（不会出现乱码方块）", emojiExcerpt)
+
+// 大文本性能：上限之内不该把长篇卡住（约 640 万码元，真实长篇网文的量级）
+var bigText = ""
+for _ in 0..<160 { bigText += tocText }
+let bigBook = TextBook(fileURL: tmp.appendingPathComponent("find-big.txt"),
+                       rawText: bigText, encodingName: "UTF-8")
+
+// 搜索缓存（findText）本身的构造成本：必须是一次 memcpy 级别。
+// 回归护栏：曾经写成 `String(decoding:units, as: UTF16.self) as NSString`，
+// 逐字重编码 UTF-8，6.4M 码元要 617ms —— 第一次按 ⌘F 像卡死一样。
+let cacheStart = Date()
+let freshCache = bigBook.findText
+let cacheMs = Date().timeIntervalSince(cacheStart) * 1000
+print(String(format: "  ⏱ 搜索缓存构建耗时 %.2f ms", cacheMs) + "（\(bigBook.units.count) 码元）")
+check(cacheMs < 50, "★ 搜索缓存构建是一次拷贝级别（不能退回 String(decoding:)）",
+      String(format: "%.2f ms", cacheMs))
+eq(freshCache.length, bigBook.units.count, "缓存长度与码元数一致")
+
+let findStart = Date()
+let bigHits = TextSearch.find(query: "这是第", haystack: bigBook.findText,
+                              chapters: bigBook.chapters)
+let findMs = Date().timeIntervalSince(findStart) * 1000
+print(String(format: "  ⏱ %d 字全文搜索耗时 %.2f ms", bigBook.units.count, findMs)
+      + "（命中 \(bigHits.hits.count) 处\(bigHits.truncated ? "，已截断" : "")）")
+check(findMs < 300, "★ 长篇全文搜索在 300 ms 内", String(format: "%.2f ms", findMs))
+check(bigHits.truncated, "常见词命中过多时置 truncated")
+eq(bigHits.hits.count, TextSearch.defaultLimit, "截断时只收上限条数")
+// 全书扫一遍、零命中也要在 300ms 内（这是最坏情况：不能靠「命中多所以提前停」）
+let rareStart = Date()
+let rare = TextSearch.find(query: "绝无此句xyz", haystack: bigBook.findText,
+                           chapters: bigBook.chapters)
+let rareMs = Date().timeIntervalSince(rareStart) * 1000
+print(String(format: "  ⏱ 全文扫描零命中耗时 %.2f ms", rareMs))
+check(rare.hits.isEmpty, "冷僻词在长篇里确实没有命中")
+check(rareMs < 300, "★ 长篇全书扫一遍（零命中）也在 300 ms 内",
+      String(format: "%.2f ms", rareMs))
+let commonStart = Date()
+let common = TextSearch.find(query: "章", haystack: bigBook.findText, chapters: bigBook.chapters)
+let commonMs = Date().timeIntervalSince(commonStart) * 1000
+check(commonMs < 300, "★ 极常见字（章）也能在 300 ms 内收满上限",
+      String(format: "%.2f ms，命中 %d", commonMs, common.hits.count))
+
+// 阅读视图高亮：只画当前页可见的命中，跳转后能跟过去
+let findView = ReadingView(frame: NSRect(x: 0, y: 0, width: 420, height: 660))
+findView.book = tocBook
+let farOffset = tocBook.units.count - 5
+findView.setSearchHighlights([0..<3, 200..<203, farOffset..<farOffset + 3], current: 0..<3)
+check(findView.debugVisibleSearchHitCount >= 1, "当前页上有可见命中")
+check(findView.debugHasCurrentSearchHighlight, "当前页上画出了当前命中")
+check(findView.debugVisibleSearchRanges.allSatisfy { $0.lowerBound < findView.page.end },
+      "可见命中都落在当前页范围内")
+check(!findView.debugVisibleSearchRanges.contains(farOffset..<farOffset + 3),
+      "★ 远处的命中不在当前页高亮里（按页过滤）")
+findView.jump(to: farOffset)
+check(findView.debugVisibleSearchRanges.contains { $0.contains(farOffset) },
+      "★ 跳到命中处后该命中进入可见范围")
+findView.clearSearchHighlights()
+eq(findView.debugVisibleSearchHitCount, 0, "清空后不再有高亮")
+
+// 设置存档：区分大小写要能原样往返
+var findSettings = ReaderSettings()
+check(!findSettings.findCaseSensitive, "查找默认不区分大小写")
+findSettings.findCaseSensitive = true
+var findHeader = CacheSchema.defaultHeader()
+findSettings.apply(to: &findHeader)
+check(ReaderSettings(header: findHeader).findCaseSensitive, "★ 区分大小写写进存档后能读回来")
+check(findHeader["macos_find_case_sensitive"]?.intValue == 1, "存档里是自定义键 macos_find_case_sensitive")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

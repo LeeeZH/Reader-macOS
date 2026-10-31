@@ -5,10 +5,10 @@ import AppKit
 do {
     let devFlags: Set<String> = [
         "--render-page", "--render-library", "--render-settings", "--render-bookmarks",
-        "--render-chapter-search",
+        "--render-chapter-search", "--render-find",
         "--dump-pages", "--library-selftest", "--dump-touchbar",
         "--close-selftest", "--quit-selftest", "--early-open-selftest",
-        "--toc-selftest", "--chapter-search-selftest",
+        "--toc-selftest", "--chapter-search-selftest", "--find-selftest",
     ]
     if CommandLine.arguments.contains(where: { devFlags.contains($0) }) {
         let dir = NSTemporaryDirectory() + "reader-devtools-\(ProcessInfo.processInfo.processIdentifier)"
@@ -53,6 +53,21 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-page"),
             view.settings.alpha = min(255, max(0, a))
         }
         for _ in 0..<pages { view.goNextPage() }
+        // 可选：--find <查询词> 把命中高亮画出来并跳到第一处（检查高亮效果用）
+        if let fi = CommandLine.arguments.firstIndex(of: "--find"),
+           CommandLine.arguments.count > fi + 1 {
+            let q = CommandLine.arguments[fi + 1]
+            let r = TextSearch.find(query: q, haystack: book.findText, chapters: book.chapters)
+            if let first = r.hits.first {
+                view.jump(to: first.index)
+                view.setSearchHighlights(r.hits.map { $0.index..<($0.index + $0.length) },
+                                         current: first.index..<(first.index + first.length))
+                FileHandle.standardError.write(
+                    "全文搜索「\(q)」命中 \(r.hits.count) 处，已跳到第 1 处\n".data(using: .utf8)!)
+            } else {
+                FileHandle.standardError.write("全文搜索「\(q)」没有命中\n".data(using: .utf8)!)
+            }
+        }
         // 可选第 5 个参数：平滑滚动的像素偏移（用来预览「滚到一半」的状态，
         // 检查下一页有没有严丝合缝地接在下面）
         if CommandLine.arguments.count > idx + 4,
@@ -218,6 +233,35 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-chapter-search"),
     do {
         try png.write(to: URL(fileURLWithPath: dst))
         FileHandle.standardError.write("已渲染章节搜索面板 → \(dst)\n".data(using: .utf8)!)
+        exit(0)
+    } catch { exit(1) }
+}
+
+// ── 开发者工具：把「查找」面板离屏渲染成 PNG ──
+// 用法： Reader --render-find <out.png> [查询词，默认「之」]
+// 渲染的是真实的面板 + 真实搜索结果（同步跑一次搜索，保证截图可复现）。
+if let idx = CommandLine.arguments.firstIndex(of: "--render-find"),
+   CommandLine.arguments.count > idx + 1 {
+    let dst = CommandLine.arguments[idx + 1]
+    let query = CommandLine.arguments.count > idx + 2 ? CommandLine.arguments[idx + 2] : "之"
+    let cwd = FileManager.default.currentDirectoryPath
+    let src = URL(fileURLWithPath: cwd + "/samples/古文观止.txt")
+    let wc = FindWindowController()
+    let book = (try? Data(contentsOf: src)).flatMap { try? TextDecoder.decode($0) }.map {
+        TextBook(fileURL: src, rawText: $0.text, encodingName: $0.encodingName)
+    }
+    wc.show(book: book, currentOffset: 0, caseSensitive: false)
+    wc.debugSearchImmediately(query)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    guard let view = wc.window.contentView,
+          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(2) }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let png = rep.representation(using: .png, properties: [:]) else { exit(3) }
+    do {
+        try png.write(to: URL(fileURLWithPath: dst))
+        FileHandle.standardError.write(
+            "已渲染查找面板 → \(dst)（查询「\(query)」，命中 \(wc.debugRowCount) 处）\n"
+                .data(using: .utf8)!)
         exit(0)
     } catch { exit(1) }
 }
@@ -915,6 +959,166 @@ if CommandLine.arguments.contains("--chapter-search-selftest") {
           "实际 \(wc.debugSelectedRow)")
 
     log(failures == 0 ? "✅ 章节搜索自检全部通过" : "❌ 章节搜索自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// ── 开发者工具：全文搜索（查找面板）自检 ──
+// 覆盖：⌘F / ⌘G / ⇧⌘G 的菜单键位、命中位置、**搜索不自动跳页**、
+// 双击 / 「跳转」才跳、单击只选中、关面板清空输入框、重新打开是空白查找。
+if CommandLine.arguments.contains("--find-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+
+    let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("reader-find-self-\(ProcessInfo.processInfo.processIdentifier)")
+    try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+
+    // 300 章：第 122 章标题里直接写阿拉伯数字（便于核对命中偏移），第 3 章带英文
+    let chapterCount = 300
+    var text = ""
+    for i in 1...chapterCount {
+        if i == 122 {
+            text += "第122章 山门旧事\n\n这是第122章的正文，山门旧事无人知。\n\n"
+        } else if i == 3 {
+            text += "第3章 Hello World\n\nHello World，hello again。\n\n"
+        } else {
+            text += "第\(i)章 测试章节\(i)\n\n这是第\(i)章的正文，用来占位。\n\n"
+        }
+    }
+    let bookURL = tmpDir.appendingPathComponent("查找测试.txt")
+    do {
+        try text.write(to: bookURL, atomically: true, encoding: .utf8)
+    } catch {
+        log("❌ 造测试文件失败: \(error)")
+        exit(1)
+    }
+
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+
+    // ---- 菜单键位：⌘F 给查找，全屏让给 ⌃⌘F ----
+    let findKey = delegate.debugShortcut(menuTitle: "阅读", itemTitle: "查找…") ?? "无"
+    check(findKey == "⌘f", "★ 「查找…」快捷键是 ⌘F", findKey)
+    let fsKey = delegate.debugShortcut(menuTitle: "视图", itemTitle: "进入全屏幕") ?? "无"
+    check(fsKey == "⌃⌘f", "★ 全屏已改为 ⌃⌘F（不再和查找抢 ⌘F）", fsKey)
+    check(delegate.debugShortcut(menuTitle: "阅读", itemTitle: "查找下一个") == "⌘g",
+          "「查找下一个」是 ⌘G")
+    check(delegate.debugShortcut(menuTitle: "阅读", itemTitle: "查找上一个") == "⇧⌘g",
+          "「查找上一个」是 ⇧⌘G")
+
+    // ---- 没打开书时菜单项禁用 ----
+    if let findItem = delegate.debugMenuItem(menuTitle: "阅读", itemTitle: "查找…") {
+        check(!delegate.validateMenuItem(findItem), "没打开书时「查找…」是禁用的")
+    } else {
+        check(false, "能找到「查找…」菜单项")
+    }
+
+    delegate.open(url: bookURL)
+    guard let data = try? Data(contentsOf: bookURL),
+          let decoded = try? TextDecoder.decode(data) else {
+        log("❌ 重新解析测试书失败")
+        exit(1)
+    }
+    let book = TextBook(fileURL: bookURL, rawText: decoded.text, encodingName: decoded.encodingName)
+    check(book.chapters.count == chapterCount, "测试书解析出 \(chapterCount) 章",
+          "实际 \(book.chapters.count)")
+
+    // ---- 打开面板 ----
+    delegate.debugShowFind()
+    check(delegate.debugFindVisible, "菜单 / ⌘F 能打开查找面板")
+    guard let wc = delegate.debugFindWindow else {
+        log("❌ 拿不到查找面板")
+        exit(1)
+    }
+    check(wc.debugRowCount == 0, "刚打开（还没有查询词）时结果为空", "实际 \(wc.debugRowCount)")
+    check(wc.debugQuery.isEmpty, "刚打开的输入框是空的", "实际「\(wc.debugQuery)」")
+    check(!wc.debugSearchFieldHasAction, "★ 搜索框没有绑定会随打字触发的 action")
+    check(wc.debugDoubleActionWired, "双击结果行接上了跳转（单击只选中）")
+
+    // ---- 搜索命中：数量、偏移，以及「不自动跳页」 ----
+    let pageBeforeSearch = delegate.debugPageStart
+    wc.debugSearchImmediately("第122章")
+    check(wc.debugRowCount == 2, "「第122章」命中 2 处（标题 + 正文）", "实际 \(wc.debugRowCount)")
+    let firstHit = wc.debugHitOffsets.first ?? -1
+    check(firstHit == book.chapters[121].index, "★ 第一处命中就是第 122 章标题起点",
+          "命中 \(firstHit)，章节起点 \(book.chapters[121].index)")
+    check(delegate.debugPageStart == pageBeforeSearch,
+          "★ 搜到结果不自动跳页", "页首 \(delegate.debugPageStart) → \(pageBeforeSearch)")
+    check(!delegate.debugHasCurrentSearchHighlight, "★ 没跳之前不画「当前命中」")
+    check(wc.debugSelectedRow == 0, "默认只选中离阅读位置最近的那一处",
+          "实际第 \(wc.debugSelectedRow) 行")
+
+    // ---- 单击只是选中，不能跳 ----
+    wc.debugClickRow(wc.debugRowCount - 1)
+    check(wc.debugSelectedRow == 1, "单击另一行会改选中", "实际第 \(wc.debugSelectedRow) 行")
+    check(delegate.debugPageStart == pageBeforeSearch, "★ 单击结果行不跳页")
+
+    // ---- 用户主动跳转（双击 / 「跳转」按钮 / 回车）才跳 ----
+    wc.debugClickRow(0)
+    wc.debugJumpToSelected()
+    check(delegate.debugPageStart == firstHit, "★ 主动跳转才跳到命中处",
+          "页首 \(delegate.debugPageStart)，命中 \(firstHit)")
+    check(delegate.debugHasCurrentSearchHighlight, "跳过去后本页有「当前命中」高亮")
+    check(delegate.debugVisibleSearchHitCount >= 1, "本页画出了命中高亮",
+          "可见 \(delegate.debugVisibleSearchHitCount)")
+    let pageRange = delegate.debugPageStart..<delegate.debugPageEnd
+    check(delegate.debugVisibleSearchRanges.allSatisfy { pageRange.overlaps($0) },
+          "★ 高亮区间都与当前页相交（不会画到别的页）")
+
+    // ---- 上一个 / 下一个（⌘G / ⇧⌘G 本身是显式命令，会跳）----
+    let secondHit = wc.debugHitOffsets.count > 1 ? wc.debugHitOffsets[1] : -1
+    delegate.debugFindNext()
+    check(wc.debugSelectedRow == 1, "⌘G 选中下一处", "实际第 \(wc.debugSelectedRow) 行")
+    check(delegate.debugPageStart == secondHit, "⌘G 跳到第二处",
+          "页首 \(delegate.debugPageStart)，期望 \(secondHit)")
+    delegate.debugFindNext()
+    check(wc.debugSelectedRow == 0, "★ 最后一处的下一处环绕回第一处",
+          "实际第 \(wc.debugSelectedRow) 行")
+    delegate.debugFindPrevious()
+    check(wc.debugSelectedRow == 1, "★ 第一处的上一处环绕到最后一处",
+          "实际第 \(wc.debugSelectedRow) 行")
+
+    // ---- 大小写（切换后重搜同样不跳）----
+    let pageBeforeCase = delegate.debugPageStart
+    wc.debugSearchImmediately("HELLO")
+    check(wc.debugRowCount == 3, "默认大小写不敏感：HELLO 命中 3 处（标题 + 正文两处）", "实际 \(wc.debugRowCount)")
+    check(delegate.debugPageStart == pageBeforeCase, "重新搜索也不跳页")
+    wc.debugSetCaseSensitive(true)
+    check(wc.debugRowCount == 0, "★ 勾上「区分大小写」后 HELLO 不再命中", "实际 \(wc.debugRowCount)")
+    wc.debugSetCaseSensitive(false)
+    check(wc.debugRowCount == 3, "关掉「区分大小写」后 HELLO 又能命中", "实际 \(wc.debugRowCount)")
+
+    // ---- 关面板：输入框清空、结果清空、高亮清除 ----
+    let pageBeforeClose = delegate.debugPageStart
+    wc.window.performClose(nil)
+    check(!delegate.debugFindVisible, "面板已关闭")
+    check(wc.debugQuery.isEmpty, "★ 关闭面板会清空输入框", "实际「\(wc.debugQuery)」")
+    check(wc.debugRowCount == 0, "关闭后结果也清空", "实际 \(wc.debugRowCount)")
+    check(delegate.debugVisibleSearchHitCount == 0, "★ 关掉面板后阅读界面不再有高亮",
+          "可见 \(delegate.debugVisibleSearchHitCount)")
+
+    // ---- 重新打开：空白的一次查找，不会跳回上次的位置（用户报过的问题）----
+    delegate.debugShowFind()
+    check(delegate.debugFindVisible, "⌘F 能重新打开面板")
+    check(wc.debugQuery.isEmpty, "★ 重新打开时输入框是空的", "实际「\(wc.debugQuery)」")
+    check(wc.debugRowCount == 0, "★ 重新打开不会自动重搜（结果为空）", "实际 \(wc.debugRowCount)")
+    check(delegate.debugPageStart == pageBeforeClose,
+          "★ 重新打开不会跳回上次搜索的位置",
+          "页首 \(delegate.debugPageStart) → \(pageBeforeClose)")
+
+    // ---- 面板关着按 ⌘G：只打开空白面板，不重放上次查询 ----
+    wc.window.performClose(nil)
+    delegate.debugFindNext()
+    check(delegate.debugFindVisible, "⌘G 能把面板打开")
+    check(wc.debugQuery.isEmpty && wc.debugRowCount == 0,
+          "面板关着按 ⌘G 也是一次空白查找", "查询「\(wc.debugQuery)」结果 \(wc.debugRowCount)")
+
+    log(failures == 0 ? "✅ 全文搜索自检全部通过" : "❌ 全文搜索自检失败 \(failures) 项")
     exit(failures == 0 ? 0 : 1)
 }
 

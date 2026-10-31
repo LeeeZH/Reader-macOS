@@ -85,13 +85,25 @@ if [ "$SEARCH_CODE" -ne 0 ]; then
     echo "  ❌ 章节搜索自检失败（退出码 $SEARCH_CODE）"; cat "$OUT/search.log"; exit 1
 fi
 
+step "4.9/5 全文搜索自检（⌘F 面板 / 不自动跳页 / 关闭清空 / 高亮 / 环绕 / 大小写）"
+set +e
+"$BIN" --find-selftest >"$OUT/find.log" 2>&1
+FIND_CODE=$?
+set -e
+grep -E "✅|❌" "$OUT/find.log" | sed 's/^/  /'
+if [ "$FIND_CODE" -ne 0 ]; then
+    echo "  ❌ 全文搜索自检失败（退出码 $FIND_CODE）"; cat "$OUT/find.log"; exit 1
+fi
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
+"$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-find.png" 0 --find "之" 2>&1 | tail -1
 "$BIN" --render-library "$OUT/library.png" 2>&1 | tail -1
 "$BIN" --render-settings "$OUT/settings.png" 2>&1 | tail -1
 "$BIN" --render-bookmarks "$OUT/bookmarks.png" 2>&1 | tail -1
 "$BIN" --render-chapter-search "$OUT/chapter-search.png" 2>&1 | tail -1
+"$BIN" --render-find "$OUT/find.png" "之" 2>&1 | tail -1
 "$BIN" --dump-pages "$ROOT/samples/古文观止.txt" 2>&1 >"$OUT/pages.tsv" | tail -1
 
 echo

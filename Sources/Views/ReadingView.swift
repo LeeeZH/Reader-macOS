@@ -21,6 +21,11 @@ final class ReadingView: NSView {
     var book: TextBook? {
         didSet {
             pageStart = 0
+            // 换书后旧的搜索高亮（按上一本书的偏移算的）必须立刻丢掉，
+            // 否则新书同一个偏移处会被莫名其妙地涂一块黄。
+            searchHitRanges = []
+            currentSearchRange = nil
+            visibleSearchRanges = []
             relayout()
         }
     }
@@ -35,6 +40,15 @@ final class ReadingView: NSView {
     private(set) var page: PageBox = .empty
     private(set) var pageStart: Int = 0
     private var lastReportedOffset = -1
+
+    // MARK: 全文搜索高亮状态
+
+    /// 全书命中的字符区间（绝对偏移，按起点升序）—— 由「查找」面板交过来。
+    private var searchHitRanges: [Range<Int>] = []
+    /// 当前选中的那一处（画得比其它命中更醒目）
+    private var currentSearchRange: Range<Int>?
+    /// 已经按「当前页 + 下一页」过滤好的可见段，绘制时直接用
+    private var visibleSearchRanges: [(range: Range<Int>, isCurrent: Bool)] = []
 
     // MARK: 平滑滚动状态
     /// 当前页在竖直方向上被顶上去的像素数。0 = 页首对齐顶部。
@@ -218,6 +232,7 @@ final class ReadingView: NSView {
         } else {
             nextPage = .empty
         }
+        refreshVisibleSearchHighlights()
         notifyStatus()
         needsDisplay = true
         if pageStart != lastReportedOffset {
@@ -369,6 +384,122 @@ final class ReadingView: NSView {
         relayout()
     }
 
+    // MARK: - 全文搜索高亮
+
+    /// 交给阅读视图一批命中区间（全书绝对偏移）以及当前选中的那一处。
+    ///
+    /// 视图不关心它们从哪来、也不做任何「页码 ↔ 偏移」换算：
+    /// 命中本身就是偏移，翻页/换字号后按当前页重新过滤即可。
+    func setSearchHighlights(_ ranges: [Range<Int>], current: Range<Int>?) {
+        searchHitRanges = ranges
+        currentSearchRange = current
+        refreshVisibleSearchHighlights()
+        needsDisplay = true
+    }
+
+    func clearSearchHighlights() {
+        guard !searchHitRanges.isEmpty || currentSearchRange != nil else { return }
+        searchHitRanges = []
+        currentSearchRange = nil
+        visibleSearchRanges = []
+        needsDisplay = true
+    }
+
+    /// 按「当前页 + 下一页」裁剪命中段。
+    ///
+    /// 为什么要带上下一页：平滑滚动时下一页是接在当前页下面一起画的，
+    /// 只裁当前页会让滚到一半的命中突然消失、滚过去又出现。
+    private func refreshVisibleSearchHighlights() {
+        guard !searchHitRanges.isEmpty else {
+            visibleSearchRanges = []
+            return
+        }
+        var visible: [Range<Int>] = []
+        visible.reserveCapacity(32)
+        func collect(_ box: PageBox) {
+            guard box.length > 0 else { return }
+            for r in searchHitRanges where r.lowerBound < box.end && r.upperBound > box.start {
+                visible.append(r)
+            }
+        }
+        collect(page)
+        if scrollOffset > 0 { collect(nextPage) }
+        visibleSearchRanges = visible.map { ($0, $0 == currentSearchRange) }
+    }
+
+    /// 某个字符偏移落在哪一类高亮里：0 = 无，1 = 普通命中，2 = 当前命中。
+    private func highlightKind(at index: Int) -> Int {
+        var kind = 0
+        for entry in visibleSearchRanges {
+            if index >= entry.range.lowerBound && index < entry.range.upperBound {
+                if entry.isCurrent { return 2 }
+                kind = 1
+            }
+        }
+        return kind
+    }
+
+    /// 在文字下面铺一层高亮。
+    ///
+    /// 颜色要分深浅两套：深色模式正文是浅色字，亮黄底 + 浅色字会看不清，
+    /// 所以深色模式改用低亮度的琥珀色。两种模式都只填背景，**文字保持不透明** ——
+    /// 这是整个界面的一贯原则（窗口半透明时也不让字跟着淡）。
+    private func drawSearchHighlights(in line: LineBox, top: CGFloat, ctx: CGContext) {
+        guard !visibleSearchRanges.isEmpty, !line.chars.isEmpty else { return }
+        let dark = isDarkAppearance
+        let normal = (dark ? NSColor(calibratedRed: 0.42, green: 0.33, blue: 0.06, alpha: 0.75)
+                           : NSColor(calibratedRed: 1.00, green: 0.90, blue: 0.45, alpha: 0.70)).cgColor
+        let current = (dark ? NSColor(calibratedRed: 0.72, green: 0.52, blue: 0.06, alpha: 0.90)
+                            : NSColor(calibratedRed: 1.00, green: 0.78, blue: 0.18, alpha: 0.85)).cgColor
+
+        // ⚠️ 必须 save/restore：这里会把 fillColor 改成高亮色，
+        //    不还原的话接下来那一行的**文字**会用高亮色画出来（正文变成一片浅黄）。
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+
+        var x = CGFloat(settings.insetLeft) + line.indent
+        var runStartX: CGFloat?
+        var runIsCurrent = false
+
+        func flush(_ endX: CGFloat) {
+            guard let startX = runStartX else { return }
+            ctx.setFillColor(runIsCurrent ? current : normal)
+            // 宽度至少 1pt：空字符（窄空格等）也要能看出「这里命中了」
+            ctx.fill(CGRect(x: startX, y: top - line.height,
+                            width: max(1, endX - startX), height: line.height))
+            runStartX = nil
+        }
+
+        for cb in line.chars {
+            let kind = highlightKind(at: cb.index)
+            if kind == 0 {
+                flush(x)
+            } else {
+                let isCurrent = kind == 2
+                if runStartX == nil {
+                    runStartX = x
+                    runIsCurrent = isCurrent
+                } else if isCurrent != runIsCurrent {
+                    // 普通命中与当前命中相邻时分成两块画，颜色才分得开
+                    flush(x)
+                    runStartX = x
+                    runIsCurrent = isCurrent
+                }
+            }
+            x += cb.advance + CGFloat(settings.charGap)
+        }
+        flush(x)
+    }
+
+    // MARK: - 自检探针（全文搜索）
+
+    /// 自检用：当前页（含平滑滚动的下一页）上可见的命中段数量
+    var debugVisibleSearchHitCount: Int { visibleSearchRanges.count }
+    /// 自检用：可见范围里是否有「当前命中」（要画出更醒目的那一处）
+    var debugHasCurrentSearchHighlight: Bool { visibleSearchRanges.contains { $0.isCurrent } }
+    /// 自检用：可供外部核对的可见命中区间
+    var debugVisibleSearchRanges: [Range<Int>] { visibleSearchRanges.map(\.range) }
+
     /// 跳到下一个章节
     func goNextChapter() {
         guard let book = book, !book.chapters.isEmpty else { return }
@@ -442,6 +573,8 @@ final class ReadingView: NSView {
     private func drawLines(_ lines: [LineBox], units: [UInt16], top: inout CGFloat, ctx: CGContext) {
         for line in lines {
             let baseline = top - metrics.ascent
+            // 高亮必须在文字之前画（填在字下面），否则会盖住字形
+            drawSearchHighlights(in: line, top: top, ctx: ctx)
             var x = CGFloat(settings.insetLeft) + line.indent
             for cb in line.chars {
                 drawChar(units, cb.index, at: CGPoint(x: x, y: baseline), ctx: ctx)
@@ -564,6 +697,8 @@ final class ReadingView: NSView {
         let canScrollDown = page.end < book.units.count
         let upper = canScrollDown ? page.flowHeight : 0
         scrollOffset = min(max(0, v), upper)
+        // 滚动会换出/换入下一页的命中段（平滑滚动时下一页是接在下面画的）
+        refreshVisibleSearchHighlights()
         needsDisplay = true
     }
 

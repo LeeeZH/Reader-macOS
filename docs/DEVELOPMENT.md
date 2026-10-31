@@ -66,7 +66,9 @@ $B --render-library   /tmp/library.png      # 阅读列表
 $B --render-settings  /tmp/settings.png     # 显示设置
 $B --render-bookmarks /tmp/bookmarks.png    # 书签面板
 $B --render-chapter-search /tmp/search.png       # 章节搜索面板（第二个参数是查询词，可省略）
+$B --render-find /tmp/find.png 之                # 全文查找面板（第二个参数是查询词）
 $B --dark --render-page 书.txt /tmp/dark.png 0   # 深色模式预览
+$B --render-page 书.txt /tmp/find.png 0 --find 之  # 正文搜索高亮预览
 $B --render-page 书.txt /tmp/mid.png 0 220       # 第 5 个参数 = 平滑滚动像素偏移
                                                   # （用来检查下一页有没有严丝合缝接上）
 ```
@@ -123,10 +125,27 @@ $B --chapter-search-selftest
 # 退出码 0 表示全部通过。
 ```
 
+**全文搜索自检**（`⌘F` 面板 / 命中偏移 / 不自动跳页 / 关闭清空 / 环绕 / 大小写）：
+
+```bash
+$B --find-selftest
+# 造一本 300 章的书（第 122 章标题直接写「第122章」，第 3 章带英文），验：
+#   · 「阅读 → 查找…」是 ⌘F、「视图 → 进入全屏幕」已改为 ⌃⌘F（不再抢 ⌘F）
+#   · 没打开书时「查找…」禁用
+#   · 命中偏移正好落在章节标题起点
+#   · ★ 搜到结果**不跳页**，也没画「当前命中」；单击结果行同样不跳
+#   · ★ 双击 / 回车 / 「跳转」才跳，跳过去后本页有当前命中高亮
+#   · ⌘G / ⇧⌘G 前进后退（这是显式命令，会跳），到头环绕
+#   · 大小写开关：HELLO 默认命中 3 处，勾上「区分大小写」后 0 处
+#   · ★ 关掉面板清空输入框 / 结果 / 高亮；重新打开是空白查找，不跳回上次位置
+#   · ★ 面板关着按 ⌘G 也只是打开一个空白面板，不重放上次查询
+# 退出码 0 表示全部通过。
+```
+
 **一键验证**（改动完跑一遍）：
 
 ```bash
-./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 离屏渲染
+./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 离屏渲染
 ```
 
 ### VSCode
@@ -179,6 +198,7 @@ $B --chapter-search-selftest
 - [x] **英文单词换行（Word wrap）**、**章前分页**、**翻页保留重叠行数**
 - [x] 章节跳转：`⌘↑` 上一章 / `⌘↓` 下一章 / 菜单栏一级「目录」（列出全书章节，不设上限；打开时从当前章开始，前面的章节倒序收在顶部子菜单；当前章打勾，按需重建）
 - [x] **章节搜索** `⌘J`：章节号（阿拉伯数字 / 中文数字 / 全角数字）和标题模糊匹配（按顺序跳字即可）；空查询列出全书并选中当前章，回车跳转；面板独立、不会在打字时误关
+- [x] **全文搜索** `⌘F`（`查找下一个` `⌘G` / `查找上一个` `⇧⌘G`）：纯本地匹配、大小写可选，结果为「章节 + 前后文」列表，跳转直接复用字符偏移；**搜索不自动跳页**（双击 / 回车 / 点「跳转」/ `⌘G` 才跳），单击只选中；当前页命中高亮（当前处与其它处分色）；**关面板清空输入框、结果与高亮**，下次打开是空白查找；单次最多 2000 处并提示截断。全屏相应改为 `⌃⌘F`
 - [x] **设置窗口** `⌘,`：分 5 个标签页 —— **显示 / 翻页 / 窗口 / 章节 / 其他**，改动即时生效并保存
 - [x] **鼠标按键逐键可配**：左键 / 右键各选「下一页 · 上一页 · 隐藏窗口 · 不动作」，左右一起按选「隐藏窗口 · 最小化窗口 · 不动作」。默认 左=下一页、右=上一页、双键=隐藏窗口
 - [x] **深色模式**：默认跟随系统外观；一旦自定义颜色就自动改用自定义值
@@ -208,15 +228,15 @@ $B --chapter-search-selftest
 **工程**
 
 - [x] **应用图标**（矢量 SVG 源，自动生成 10 个尺寸的 `.icns`）
-- [x] **381 项单元测试**（含分页回翻、逐行滚动、word wrap、章前分页、书架缓存、进度口径、深色模式）
+- [x] **核心逻辑单测**（数量以 `./test.sh` 输出为准，不在这里写死 ——
+      以前两处分别写着 381 / 450，早就对不上了）
 - [x] **触控栏支持**：翻页 / 进度 / 换章（上/下一章）/ 书签 / 字号，两侧 popover 收纳长尾操作
 
-尚未实现（按方案文档的路线图推进）：
+尚未实现（进度与顺序看 [路线图](ROADMAP.md)，这里只列结论）：
 
-- [ ] 全文搜索
 - [ ] **章节标题独立字体/颜色**（`use_same_font` / `font_title` / `title_color`：字段已能读写，渲染层还没做双字体）
-- [ ] 背景图片（拉伸/平铺）、无边框窗口（全屏已用系统 `⌘F` 实现）
-- [ ] 在线书源（P2）、EPUB（P3，MOBI 建议放弃）
+- [ ] 背景图片（拉伸/平铺/平铺翻转）、无边框窗口
+- [ ] 在线书源（需要先改「完全离线」的产品承诺）、EPUB（需要先做书籍抽象 + 零依赖 ZIP，MOBI 放弃）
 
 ---
 
@@ -227,32 +247,53 @@ Reader/
 ├── build.sh                  构建：swiftc → .app（并生成 compile_commands.json）
 ├── run.sh                    构建并运行
 ├── test.sh                   核心逻辑单测
+├── verify.sh                 一键验证（构建 → 单测 → 全部自检 → 离屏渲染）
 ├── compile_commands.json     自动生成，给 sourcekit-lsp 用（已 gitignore）
 ├── Resources/Info.plist      Bundle 配置
 ├── samples/古文观止.txt           样书（3 章，UTF-8）
 ├── samples/古文观止-GBK.txt       同一本样书的 GBK 编码版
+├── samples/golden-pages.tsv  分页基准快照（parity 回归用）
 ├── docs/DEVELOPMENT.md       开发笔记（本文件）
-├── docs/images/reading.png   README 用的界面截图
+├── docs/ROADMAP.md           路线图：接下来做什么 / 明确不做什么
+├── docs/images/               README 用的界面截图
 ├── Tests/main.swift          单测入口
+├── tools/MakeIcon.swift      图标生成
 ├── .vscode/                  tasks / launch / settings
 └── Sources/
-    ├── main.swift            入口
+    ├── main.swift            入口（+ 全部 `--render-*` / `--*-selftest` 开发工具）
     ├── App/
-    │   └── AppDelegate.swift 菜单、窗口、打开文件
+    │   ├── AppDelegate.swift 菜单、窗口、打开文件、查找 / 收藏 / 设置接线
+    │   ├── GlobalHotKey.swift ⌃⌥H 全局热键
+    │   ├── StatusItemController.swift 菜单栏图标
+    │   ├── ReaderTouchBar.swift 触控栏
+    │   ├── WindowDragStrip.swift 沉浸模式下的顶部拖动条
+    │   └── NSScreen+Primary.swift 主屏高度（Win32 坐标换算用）
     ├── Core/                 纯逻辑，不依赖 UI，可单测
     │   ├── Types.swift       默认值（数值照搬原版 Cache.cpp）
     │   ├── TextDecoder.swift 编码识别
     │   ├── TextNormalizer.swift  FormatText / GetLine  ← 兼容性关键
     │   ├── ChapterParser.swift   三种章节解析模式
     │   ├── ChapterSearch.swift   章节搜索（数字 / 中文数字 / 标题模糊）
-    │   └── Book.swift        TXT 书籍模型
+    │   ├── TextSearch.swift      全文搜索（NSString 匹配 + 非重叠 + 上限）
+    │   ├── Book.swift        TXT 书籍模型（含 findText 搜索缓存）
+    │   ├── JSONValue.swift   保序 JSON + 类型化访问器
+    │   ├── CacheDocument.swift  `.cache.dat` 47 键 schema
+    │   ├── LibraryStore.swift   存档读写 / 书架 / 进度 / 书签
+    │   ├── ReaderSettings.swift 设置的「类型化视图」
+    │   ├── ReadingStatus.swift  进度口径（唯一一处）
+    │   ├── FontResolver.swift   Windows 字体回退
+    │   └── WindowPlacement.swift Win32 → Cocoa 坐标换算
     ├── Layout/               排版计算
     │   ├── TextMetrics.swift 字体度量 + advance 缓存
     │   └── PageModel.swift   页/行/字符数据模型
     └── Views/
-        ├── ReadingView.swift 自绘阅读视图 + 分页
+        ├── ReadingView.swift 自绘阅读视图 + 分页 + 搜索高亮
         ├── TOCMenuContent.swift 目录菜单内容（全部章节 + 当前章定位）
-        └── ChapterSearchWindow.swift 章节搜索面板（⌘J）
+        ├── ChapterSearchWindow.swift 章节搜索面板（⌘J）
+        ├── FindWindow.swift  全文查找面板（⌘F）
+        ├── BookmarkWindow.swift 书签面板
+        ├── LibraryWindow.swift  阅读列表（书架）
+        └── SettingsWindow.swift 设置窗口
 ```
 
 ---
@@ -347,6 +388,41 @@ Reader/
 一页 500~2000 次，每次重绘全量重测。
 本项目用 `TextMetrics` 做逐码元 advance 缓存，这是相对原版最大的提升点。
 
+### 8. 全文搜索：匹配交给 `NSString`，坐标留给自研分页
+
+搜索要解决两件事：**在哪**（偏移）和**怎么匹配**（大小写、非重叠）。
+
+- **匹配**：用 `NSString.range(of:options:range:)`，返回值天然是 UTF-16 下标，
+  正是 `units` / 进度 / 书签 / 章节锚点的坐标。为什么不在 Swift 层自己
+  「先转小写再 indexOf」：折叠会让串**变长**（`ß → ss`、`İ → i̇`），
+  折叠串的下标就不等于原文偏移，`jump(to:)` 会越跳越偏。
+- **坐标**：`TextBook.findText` 是 `units` 的 `NSString` 视图（`lazy` 缓存），
+  二者下标一一对应；单测里有一条专门钉死 `findText.length == units.count`。
+  构造它**只能**用 `NSString(characters:length:)`（一次 memcpy，6.4M 码元 0.7ms），
+  不能用 `String(decoding:units, as: UTF16.self) as NSString` ——
+  后者会把 UTF-16 逐字重编码成 UTF-8，同样的书实测 **617ms**，
+  正好卡在「第一次按 ⌘F」上，看起来像搜索卡死。单测为这条留了回归护栏
+  （缓存构造成本必须 < 50ms）。
+- **性能实测**（638 万码元的长篇，`Tests/main.swift` 里有断言守着）：
+  缓存构建 0.7ms · 命中密集（收满 2000 处）32ms · 常见字收满上限 30ms ·
+  全书扫一遍**零命中 171ms**（最坏情况，不能靠「命中多所以提前停」）。
+- **非重叠**：游标跳过整条命中（`aaaa` 查 `aa` = 2 处），和常见查找器一致。
+- **上限**：单次最多 2000 处。中文常见字在几 MB 的小说里有几十万处，
+  全收既吃内存也没人看得完；到上限后**再探一次**，确定是否真的还有剩余
+  才置 `truncated`（否则「命中数正好等于上限」会被误报成截断）。
+- **交互三原则**（用户提过两轮，别再改回去）：
+  1. 搜索**不跳页**。结果只列出来、顺手选中离阅读位置最近的一处；
+     跳转必须是主动动作 —— 双击、回车、点「跳转」、`⌘G` / `⇧⌘G`。
+     打字时结果每 250ms 换一批，自动跳页会一边打字一边把人甩走。
+  2. 单击结果行**只改选中**，不跳；否则用方向键挑结果会被一路带跑。
+  3. **关闭 = 本次查找结束**：关面板清空输入框、结果和高亮。
+     下次 `⌘F` / `⌘G` 都是空白面板，不记忆查询词、不跳回上次的位置。
+- **不卡输入**：防抖 250ms + 后台队列 + generation 计数丢弃过期结果。
+  打字快时先发的慢查询不能覆盖后发的快查询 —— 少了 generation，
+  列表会「闪回」上一个查询词的结果。
+- **高亮**：只画「当前页 + 平滑滚动的下一页」的交集。翻页 / 换字号 / 滚动的
+  都是同一套重算路径，所以不需要维护任何「高亮页缓存」。
+
 ---
 
 ## 数据存放位置
@@ -425,6 +501,9 @@ READER_CACHE_PATH=/任意/位置/cache.dat ./run.sh
 
 | 现象 | 根因 |
 |---|---|
+| 搜索高亮之后**整页正文都变成浅黄色** | `drawLines` 先画高亮矩形再画字，而高亮里把 `ctx.fillColor` 改成了黄色却没还原 —— 后面那行的文字就用高亮色画出来了。修复：`drawSearchHighlights` 里 `saveGState` / `defer restoreGState`。离屏渲染 `--render-page … --find 之` 一眼就能看出来 |
+| 搜完就自己跳页、关掉面板还记得上次的词（用户反馈） | 第一版把「搜索完成 → 跳到第一处」「关闭仍保留查询词」当成贴心。实际体验是：打字时结果每 250ms 换一批，页面跟着乱跳；下次按 ⌘F 还没输字就被带回上次的位置。现在约定：搜索只列结果（自动选中但不跳），跳转必须双击 / 回车 / 点「跳转」/ ⌘G；关闭清空输入框、结果和高亮。`--find-selftest` 里有 8 条断言钉住这些行为 |
+| 第一次按 ⌘F 像卡死（长篇约半秒才出结果） | 搜索缓存写成了 `String(decoding: units, as: UTF16.self) as NSString`：Swift String 内部是 UTF-8，这一步会把 6.4M 个 UTF-16 码元**逐字重编码**，实测 617ms。改成 `NSString(characters:length:)`（一次 memcpy）后 0.7ms。缓存构建慢 ≠ 搜索慢，两者要分开量 —— 单测现在分别钉住 |
 | 双击 txt / 拖到 Dock 图标时崩溃（`EXC_BREAKPOINT`） | `application(_:openFile:)` 在 `finishLaunching` 阶段就触发，**比 `applicationDidFinishLaunching` 更早** —— 那时窗口还没建，`open(url:)` 撞上隐式解包 nil。用 `isWindowReady` 挂起成 `pendingFile` 解决 |
 | 点关闭按钮后「Reader 意外退出」 | `NSWindow.isReleasedWhenClosed` 默认 **true**。ARC 下 AppKit 关闭窗口时会额外发一次 `release`，把 ARC 那一个引用计数也减掉 → 窗口被释放，`window` 属性变野指针。随后 AppKit 自动 `terminate:`，`applicationWillTerminate` 里读 `window.frame` 直接 SIGSEGV。三个辅助窗口都设了 `false`，唯独主窗口漏了 |
 | 任何 >4096 字节的 UTF-8 文件被误判编码 | `isValidUTF8` 的探测窗口正好把多字节字符切成两半时判成非法。原版 `Utils.cpp` 里作者留了注释 `break;//return 0; fixed bug.... substr`，移植时照搬了**修复前**的写法 |
@@ -602,7 +681,7 @@ macOS 镜像与本地环境不一致，两次都挂在构建阶段，于是撤�
 
 ```bash
 ./verify.sh
-# 构建 → 450 项单测 → 启动冒烟 → 窗口自检 → 离屏渲染，任何一步失败都会停
+# 构建 → 全部单测 → 启动冒烟 → 窗口自检 → 离屏渲染，任何一步失败都会停
 ```
 
 ### 3. 打包（必须用 ditto，不能用 zip）
@@ -682,11 +761,14 @@ SHA256 见本页 `SHA256SUMS.txt`
 
 ## 下一步
 
-按方案文档的路线图：
+**做什么、按什么顺序、明确不做什么：见 [路线图](ROADMAP.md)。**
+这里只留几条「工程上还要持续补」的：
 
-1. **全文搜索**（对应原版 Ctrl+F）——难点是「搜索结果 ↔ 分页字符偏移」的映射，跳转复用 `jump(to:)`
-2. **章节标题独立字体 / 颜色**——`use_same_font` / `font_title` / `title_color` 字段已经能读写，渲染层还没做双字体
-3. **背景图片**（拉伸 / 平铺）、**无边框窗口**
-4. **在线书源**（P2）——对照 `reference/Reader/Reader.cpp` 里 `ENABLE_NETWORK` 那段
-5. **EPUB**（P3）——对照 `EpubBook.cpp` / `Epub.cpp`；MOBI 建议放弃
-6. 持续补 **parity 测试**：用原版导出同一批 TXT 的「章节列表 + 每页首字符偏移」，逐页比对
+1. **parity 测试**：用原版导出同一批 TXT 的「章节列表 + 每页首字符偏移」，
+   逐页比对。`samples/golden-pages.tsv` 是当前的基准快照；
+   分页相关的改动（例如章节标题独立字体）之后必须重新导出并核对。
+2. **新功能都要有对应的 `--xxx-selftest`**：`verify.sh` 里每一步都对应一个
+   曾经真出过问题的路径（关窗、启动前打开、目录截断、面板自己关、高亮串色）。
+   只加实现不加自检，下一个改这块的人会重新踩一遍。
+3. **文档里的数字不要写死**（测试数量、页码、版本号），能引用 `./test.sh`、
+   `--dump-pages`、`Info.plist` 的就不要手抄。

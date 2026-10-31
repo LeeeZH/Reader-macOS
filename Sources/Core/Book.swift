@@ -11,6 +11,24 @@ final class TextBook {
     let units: [UInt16]
     private(set) var chapters: [Chapter]
 
+    /// 全文搜索用的字符串视图。
+    ///
+    /// `units` 是 `let`，所以这份「一次构建、反复搜索」的缓存永远和正文一致。
+    ///
+    /// ⚠️ 一定要用 `NSString(characters:length:)`，**不要**写成
+    /// `String(decoding: units, as: UTF16.self) as NSString`：
+    ///   · 后者会把 UTF-16 逐字重编码成 Swift String 的 UTF-8 存储，
+    ///     6.4M 码元实测 **617ms**（而且多占约 1.5 倍内存）；
+    ///   · 前者只是一次 12MB 的 memcpy，实测 **0.6ms**。
+    /// 差出来的半秒正好卡在「第一次按 ⌘F」上，用户会以为搜索卡死。
+    ///
+    /// ⚠️ 它的下标就是 `units` 的下标（UTF-16 码元），所以搜索命中可以直接
+    /// 交给 `jump(to:)` —— 不需要任何「页码 ↔ 偏移」的换算。
+    lazy var findText: NSString = units.withUnsafeBufferPointer { buf in
+        guard let base = buf.baseAddress, buf.count > 0 else { return "" as NSString }
+        return NSString(characters: base, length: buf.count)
+    }
+
     /// 章节表版本号：每重新解析一次 +1。
     /// 自检用它断言「改显示设置（字号 / 行距……）不该重新解析全书章节」。
     private(set) var chapterParseGeneration = 0
