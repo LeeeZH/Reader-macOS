@@ -14,7 +14,7 @@ final class BookmarkWindowController: NSObject, NSTableViewDataSource, NSTableVi
     private var buttons: [NSButton] = []
 
     /// 当前书（用于把字符偏移翻译成章节名）
-    private var book: TextBook?
+    private var book: Book?
 
     private let colChapter = NSUserInterfaceItemIdentifier("chapter")
     private let colOffset = NSUserInterfaceItemIdentifier("offset")
@@ -108,7 +108,7 @@ final class BookmarkWindowController: NSObject, NSTableViewDataSource, NSTableVi
         updateHint()          // 提示与按钮可用状态都在里面一起更新
     }
 
-    func update(book: TextBook?) {
+    func update(book: Book?) {
         self.book = book
         reload()
     }

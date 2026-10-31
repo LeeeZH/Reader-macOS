@@ -14,7 +14,7 @@ final class ChapterSearchWindowController: NSObject, NSTableViewDataSource, NSTa
     private var hintLabel: NSTextField!
     private var jumpButton: NSButton!
 
-    private var book: TextBook?
+    private var book: Book?
     private var currentOffset = 0
     /// 当前筛选结果；空查询时就是全书章节（按顺序），方便直接当目录用
     private var hits: [ChapterSearchHit] = []
@@ -119,7 +119,7 @@ final class ChapterSearchWindowController: NSObject, NSTableViewDataSource, NSTa
     }
 
     /// 打开面板；从当前阅读位置开始（空查询时直接定位到当前章）
-    func show(book: TextBook?, currentOffset: Int) {
+    func show(book: Book?, currentOffset: Int) {
         self.book = book
         self.currentOffset = currentOffset
         resetToCurrentBook()
@@ -132,7 +132,7 @@ final class ChapterSearchWindowController: NSObject, NSTableViewDataSource, NSTa
     }
 
     /// 换书 / 章节规则变了之后同步内容（窗口没显示时只记下来，等 show 时再刷新）
-    func update(book: TextBook?, currentOffset: Int) {
+    func update(book: Book?, currentOffset: Int) {
         self.book = book
         self.currentOffset = currentOffset
         guard window.isVisible else { return }

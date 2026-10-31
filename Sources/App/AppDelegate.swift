@@ -338,9 +338,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let decoded = try TextDecoder.decode(data)
                 guard self.isCurrentOpenRequest(requestID) else { return }
                 let t2 = Date()
-                let book = TextBook(fileURL: url, rawText: decoded.text,
-                                    encodingName: decoded.encodingName,
-                                    chapterRule: settings.chapterRule)
+                let book = BookLoader.makeBook(url: url, decoded: decoded,
+                                               chapterRule: settings.chapterRule)
                 guard self.isCurrentOpenRequest(requestID) else { return }
                 let t3 = Date()
                 if timingEnabled {
@@ -395,9 +394,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         do {
             let data = try Data(contentsOf: url)
             let decoded = try TextDecoder.decode(data)
-            let book = TextBook(fileURL: url, rawText: decoded.text,
-                                encodingName: decoded.encodingName,
-                                chapterRule: library.settings.chapterRule)
+            let book = BookLoader.makeBook(url: url, decoded: decoded,
+                                           chapterRule: library.settings.chapterRule)
             apply(book: book, url: url, restoreOffset: restoreOffset)
         } catch {
             if readingView.book != nil { attachProgressCallback() }
@@ -406,7 +404,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// 打开结果落到主线程之后：接上阅读视图 / 书架 / 辅助窗口 / 进度。
-    private func apply(book: TextBook, url: URL, restoreOffset: Int?) {
+    /// 参数是 `Book` 协议：以后接 EPUB 时这里不用改。
+    private func apply(book: Book, url: URL, restoreOffset: Int?) {
         let settings = library.settings
         // 打开时已按同一规则解析过，这里通常是 no-op；设置若在加载期间被改过则补一次
         book.applyChapterRule(settings.chapterRule)
@@ -601,9 +600,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             statusLabel?.stringValue = "先打开一本书再进入编辑模式"
             return
         }
-        editOriginalText = book.rawText
+        // 编辑模式只对可写回的格式开放（目前只有 TXT；EPUB 等只读格式会被挡下）
+        guard book.supportsEditing, let textBook = book as? TextBook else {
+            NSSound.beep()
+            statusLabel?.stringValue = "编辑模式只能改 TXT 文件"
+            return
+        }
+        editOriginalText = textBook.rawText
         // 记住「正在编辑哪本书」——保存时必须按这个身份写，不能读 readingView.book
-        editingBook = book
+        editingBook = textBook
 
         let scroll = NSScrollView(frame: readingView.frame)
         scroll.autoresizingMask = [.width, .height]
@@ -628,7 +633,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             ?? NSFont.systemFont(ofSize: s.fontPointSize)
         tv.textColor = NSColor(cgColor: s.renderTextColor(dark: isDarkAppearance)) ?? .labelColor
         tv.backgroundColor = NSColor(cgColor: s.renderBackgroundColor(dark: isDarkAppearance)) ?? .textBackgroundColor
-        tv.string = book.rawText
+        tv.string = textBook.rawText
 
         scroll.documentView = tv
         window.contentView?.addSubview(scroll)
@@ -1578,6 +1583,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             || menuItem.action == #selector(findPrevious(_:)) {
             // 没打开书时禁用：点了也不会有结果，只会让状态栏弹一句提示
             return readingView?.book != nil
+        }
+        if menuItem.action == #selector(toggleEditMode(_:)) {
+            // 只读格式（以后的 EPUB）不提供编辑模式
+            return readingView?.book?.supportsEditing ?? false
         }
         return true
     }

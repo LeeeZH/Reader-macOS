@@ -19,7 +19,8 @@ final class ReadingView: NSView {
         }
     }
 
-    var book: TextBook? {
+    /// 当前打开的书。只依赖 `Book` 协议（M7 换格式时这里不用改）。
+    var book: Book? {
         didSet {
             pageStart = 0
             // 换书后旧的搜索高亮（按上一本书的偏移算的）必须立刻丢掉，

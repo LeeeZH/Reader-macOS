@@ -350,10 +350,11 @@ final class LibraryStore {
             guard let self = self else { return }
             var computed: [String: Int] = [:]
             for (path, url) in pending {
-                guard let data = try? Data(contentsOf: url),
-                      let decoded = try? TextDecoder.decode(data) else { continue }
-                // 必须和 ReadingView 用的长度口径一致：FormatText 之后的码元数
-                computed[path] = TextNormalizer.format(Array(decoded.text.utf16)).count
+                // 走 BookLoader，不在这里写死 TXT 解码 —— 接 EPUB 时只需改那一处
+                if let length = BookLoader.totalLength(ofFileAt: url) {
+                    // 口径由 BookLoader 保证与 ReadingView 一致：FormatText 之后的码元数
+                    computed[path] = length
+                }
             }
             DispatchQueue.main.async {
                 for (k, v) in computed { self.lengthCache[k] = v }

@@ -2157,6 +2157,110 @@ check(scNoopHeader["macos_shortcuts"] == nil, "★ 冗余覆盖在写盘时被�
 scNoop.setShortcut(nil, for: .showLibrary)
 check(scNoop.shortcutIsOverridden(.showLibrary), "主动清空绑定仍然算「改过」")
 
+// ============ 29. 书籍协议（Book，M7 EPUB 前置） ============
+print("\n[29] 书籍协议 Book")
+
+// 协议的意义：阅读视图 / 查找 / 章节搜索 / 书签面板只依赖 Book，
+// 不知道背后是 TXT 还是以后要接的 EPUB。这里钉住三件事：
+//   ① TXT 通过协议暴露的语义不变；
+//   ② 协议扩展里的默认实现与 TextBook 同语义（新格式只提供 units / chapters 即可）；
+//   ③ BookLoader 是唯一的加载入口（以后加 EPUB 只改它）。
+
+/// 只实现协议要求的最小成员：offset 相关全部走协议扩展的默认实现。
+/// 以后 `EpubBook` 就是这么接入的 —— 不需要复制章节偏移逻辑。
+final class StubBook: Book {
+    let fileURL: URL
+    let displayName: String
+    let encodingName: String
+    let units: [UInt16]
+    let chapters: [Chapter]
+    let chapterParseGeneration = 0
+    let chapterRule = ChapterRule()
+    let findText: NSString
+
+    init(fileURL: URL, units: [UInt16], chapters: [Chapter],
+         displayName: String = "stub", encodingName: String = "STUB") {
+        self.fileURL = fileURL
+        self.displayName = displayName
+        self.encodingName = encodingName
+        self.units = units
+        self.chapters = chapters
+        if units.isEmpty {
+            self.findText = "" as NSString
+        } else {
+            self.findText = units.withUnsafeBufferPointer {
+                NSString(characters: $0.baseAddress!, length: $0.count)
+            }
+        }
+    }
+
+    func applyChapterRule(_ rule: ChapterRule) {}
+}
+
+var protoLines: [String] = []
+for c in 1...4 {
+    protoLines.append("第\(c)章 章节标题\(c)")
+    protoLines.append("")
+    protoLines.append("    正文内容正文内容正文内容正文内容正文内容" + String(c))
+    protoLines.append("")
+}
+let protoText = protoLines.joined(separator: "\n")
+let protoURL = tmp.appendingPathComponent("proto.txt")
+try protoText.write(to: protoURL, atomically: true, encoding: .utf8)
+let protoBook = TextBook(fileURL: protoURL, rawText: protoText, encodingName: "UTF-8")
+let proto: Book = protoBook
+eq(proto.totalLength, protoBook.units.count, "协议 totalLength = 规范化后的码元数")
+eq(proto.displayName, "proto", "协议 displayName 取文件名")
+eq(proto.encodingName, "UTF-8", "协议暴露编码名（状态栏要用）")
+eq(proto.chapters.count, 4, "协议能拿到章节表")
+check(proto.supportsEditing, "TXT 支持编辑模式")
+eq(proto.chapters[1].title, "第2章 章节标题2", "章节表内容不变")
+
+let protoView = ReadingView(frame: NSRect(x: 0, y: 0, width: 320, height: 500))
+protoView.book = proto
+check(protoView.page.end > 0, "ReadingView 能直接吃 Book 协议（不再是具体类）")
+protoView.book = nil
+
+// 协议扩展的默认实现：与 TextBook 逐偏移一致
+let stub = StubBook(fileURL: protoURL, units: protoBook.units, chapters: protoBook.chapters)
+check(!stub.supportsEditing, "★ 只读格式默认不支持编辑（EPUB 不会误开编辑模式）")
+let emptyStub = StubBook(fileURL: protoURL, units: [], chapters: [])
+var firstMismatch = -1
+for off in 0..<proto.totalLength where stub.chapterIndex(at: off) != protoBook.chapterIndex(at: off) {
+    firstMismatch = off
+    break
+}
+check(firstMismatch == -1, "★ 默认 chapterIndex 与 TextBook 逐偏移一致",
+      "首个不一致偏移 \(firstMismatch)")
+for (i, ch) in protoBook.chapters.enumerated() {
+    eq(stub.chapterIndex(at: ch.index), i, "默认 chapterIndex 命中第 \(i) 章起点")
+    check(stub.isChapterStart(at: ch.index), "默认 isChapterStart 认得第 \(i) 章起点")
+    check(stub.isChapterTitle(at: ch.index), "默认 isChapterTitle：标题首字算标题")
+    eq(stub.chapterTitle(at: ch.index), ch.title, "默认 chapterTitle 取到第 \(i) 章标题")
+}
+let firstTitleEnd = protoBook.chapters[0].index + protoBook.chapters[0].titleLength
+check(!stub.isChapterStart(at: firstTitleEnd), "标题区间之后的偏移不是章节起点")
+check(!stub.isChapterTitle(at: firstTitleEnd), "标题区间之后的偏移不算标题")
+eq(emptyStub.chapterIndex(at: 0), 0, "空章节表 chapterIndex 返回 0 不崩")
+check(!emptyStub.isChapterTitle(at: 0), "空章节表 isChapterTitle 为 false")
+eq(emptyStub.chapterTitle(at: 0), nil, "空章节表 chapterTitle 为 nil")
+eq(emptyStub.totalLength, 0, "空书 totalLength = 0")
+
+// BookLoader：唯一加载入口 + 书架字数口径
+check(BookLoader.supports(protoURL), "BookLoader 认得 .txt")
+check(!BookLoader.supports(tmp.appendingPathComponent("a.epub")),
+      "★ 暂不支持 .epub（M7 再接，现在不能假装能读）")
+check(!BookLoader.supports(tmp.appendingPathComponent("a.md")), ".md 不在支持列表里")
+eq(BookLoader.totalLength(ofFileAt: protoURL) ?? -1, protoBook.totalLength,
+   "★ 书架算的总字数与 ReadingView 口径一致")
+eq(BookLoader.totalLength(ofFileAt: tmp.appendingPathComponent("missing.txt")), nil,
+   "文件不存在时返回 nil（不崩）")
+let loadedBook = BookLoader.makeBook(url: protoURL,
+                                     decoded: DecodedText(text: protoText, encodingName: "UTF-8"),
+                                     chapterRule: ChapterRule())
+eq(loadedBook.totalLength, protoBook.totalLength, "BookLoader.makeBook 得到同一本书")
+eq(loadedBook.chapters.count, protoBook.chapters.count, "makeBook 的章节表一致")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

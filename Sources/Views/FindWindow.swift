@@ -37,7 +37,7 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
     private var nextButton: NSButton!
     private var jumpButton: NSButton!
 
-    private var book: TextBook?
+    private var book: Book?
     /// 打开面板时读者所在的位置：结果自动选中这里附近的那一处（只选中，不跳）。
     private var anchorOffset = 0
     private(set) var results = SearchResults.empty
@@ -184,7 +184,7 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
     ///
     /// **每次打开都是一次全新的查找**：输入框清空、结果清空、不跳转。
     /// 这样「上次搜到第 12 章」不会在下次按 ⌘F 时把人拽回去。
-    func show(book: TextBook?, currentOffset: Int, caseSensitive: Bool) {
+    func show(book: Book?, currentOffset: Int, caseSensitive: Bool) {
         self.book = book
         self.anchorOffset = currentOffset
         caseCheck.state = caseSensitive ? .on : .off
@@ -201,7 +201,7 @@ final class FindWindowController: NSObject, NSTableViewDataSource, NSTableViewDe
     ///
     /// 面板开着、查询词还在的话，按新书重搜一次**并且不跳转** —— 换书时最不希望的
     /// 就是页面自己跳走；书关掉了就把输入框也清掉。
-    func update(book: TextBook?) {
+    func update(book: Book?) {
         self.book = book
         cancelPendingSearch()
         searchGeneration += 1              // 让还在跑的后台搜索作废

@@ -298,11 +298,16 @@ $B --shortcut-selftest
 - [x] **应用图标**（矢量 SVG 源，自动生成 10 个尺寸的 `.icns`）
 - [x] **核心逻辑单测**（数量以 `./test.sh` 输出为准，不在这里写死 ——
       以前两处分别写着 381 / 450，早就对不上了）
+- [x] **书籍格式抽象 `Book` 协议**（M7 EPUB 的前置，见设计决策 12）：
+      `ReadingView` / 查找 / 章节搜索 / 书签面板 / 打开流程都面向协议，
+      `BookLoader` 是唯一加载入口；协议扩展给出章节偏移的默认实现，
+      新格式只提供 `units` / `chapters` 即可。存档仍然只存路径 + 字符偏移
 - [x] **触控栏支持**：翻页 / 进度 / 换章（上/下一章）/ 书签 / 字号，两侧 popover 收纳长尾操作
 
 尚未实现（进度与顺序看 [路线图](ROADMAP.md)，这里只列结论）：
 
-- [ ] 在线书源（需要先改「完全离线」的产品承诺）、EPUB（需要先做书籍抽象 + 零依赖 ZIP，MOBI 放弃）
+- [ ] 在线书源（需要先改「完全离线」的产品承诺）、EPUB（书籍抽象 `Book` 协议已完成；
+      还差零依赖 ZIP 原型 + EPUB 专用文本规范化，见路线图 M7），MOBI 放弃
 
 ---
 
@@ -342,7 +347,7 @@ Reader/
     │   ├── ChapterParser.swift   三种章节解析模式
     │   ├── ChapterSearch.swift   章节搜索（数字 / 中文数字 / 标题模糊）
     │   ├── TextSearch.swift      全文搜索（NSString 匹配 + 非重叠 + 上限）
-    │   ├── Book.swift        TXT 书籍模型（含 findText 搜索缓存）
+    │   ├── Book.swift        `Book` 协议 + `BookLoader`（格式分发）+ `TextBook`
     │   ├── JSONValue.swift   保序 JSON + 类型化访问器
     │   ├── CacheDocument.swift  `.cache.dat` 47 键 schema
     │   ├── LibraryStore.swift   存档读写 / 书架 / 进度 / 书签
@@ -605,6 +610,43 @@ floating 窗口，所以主窗口浮起来之后，设置窗口会被自家主�
   候选键位只在「交换 / 取消」确认前临时显示，切标签页保留，开始录别的键 / 关窗 /
   取消都要把那一行换回真实生效值 —— 否则界面会出现「两个 command + L」却没解释，
   重开设置又悄悄变回去。
+
+---
+
+### 12. 书籍格式抽象：`Book` 协议（M7 EPUB 的前置）
+
+以前 `ReadingView` / 查找 / 章节搜索 / 书签面板的字段类型是具体的 `TextBook`，
+接 EPUB 就得把这些文件挨个改成 `EpubBook`；现在它们只认 `Book` 协议，
+**换格式时界面一行都不用改**。约束只有一条：新格式必须先把正文规范化成
+`[UInt16]`（`units`），所有字符偏移（进度 / 书签 / 章节锚点 / 搜索命中）
+仍然是这个数组的下标 —— 这套坐标是与 Windows 版存档互通的前提，
+不能引入页码 / 百分比当坐标。
+
+分工：
+
+- `Sources/Core/Book.swift`：
+  - `Book` 协议：`units` / `chapters` / 书名 / 路径 / 编码名 / 搜索缓存 /
+    章节规则 / `supportsEditing` + 章节偏移查询；
+  - 协议扩展：`chapterIndex` / `isChapterStart` / `isChapterTitle` / `chapterTitle`
+    的默认实现（二分，与 `TextBook` 同语义）。`TextBook` 因为性能保留了自己的
+    覆写（章节起点集合 + 空表短路），**两套必须逐偏移一致**，单测钉住了；
+  - `BookLoader`：唯一的加载入口 —— `supports(url:)` / `makeBook(url:decoded:chapterRule:)` /
+    `totalLength(ofFileAt:)`。EPUB 接进来时只改这里。
+- `TextBook: Book`：TXT 的实现，`supportsEditing = true`。
+- 消费者：`ReadingView.book`、三个面板的 `book`、`AppDelegate.apply(book:)` 都是 `Book`；
+  书架算百分比用的「总字数」走 `BookLoader.totalLength`（`LibraryStore.prefetchLengths`），
+  不再内联写 TXT 解码。
+- 编辑模式（`⌘E`）只对 `supportsEditing` 的格式开放，菜单校验也按它置灰 ——
+  以后打开 EPUB 时编辑菜单是灰的，不会「点了没反应」。
+
+**加一种新格式要做什么**：写一个 `Book` 实现（必须提供 `units` / `chapters` /
+`findText` / `chapterParseGeneration` / `chapterRule` / `applyChapterRule`），
+再到 `BookLoader` 的三处按扩展名分发。`.cache.dat` 不用动：它只存路径 + 字符偏移，
+与格式无关。
+
+单测 `[29] 书籍协议 Book` 钉住：TXT 通过协议暴露的语义不变、协议扩展的默认实现
+与 `TextBook` 逐偏移一致、只读格式默认不能编辑、`BookLoader` 的字数口径与
+`ReadingView` 一致。
 
 ---
 
