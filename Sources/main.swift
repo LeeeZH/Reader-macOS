@@ -7,6 +7,7 @@ do {
         "--render-page", "--render-library", "--render-settings", "--render-bookmarks",
         "--render-chapter-search", "--render-find",
         "--dump-pages", "--dump-chapters", "--library-selftest", "--dump-touchbar",
+        "--epub-selftest",
         "--close-selftest", "--quit-selftest", "--early-open-selftest",
         "--open-async-selftest", "--open-bench",
         "--toc-selftest", "--chapter-search-selftest", "--find-selftest",
@@ -32,6 +33,21 @@ do {
 
 let app = NSApplication.shared
 
+/// 开发工具共用：按格式打开一本书（TXT 走解码，EPUB 走解包 + 解析）。
+/// 返回 `Book` 协议，所以 dump / render 工具不用关心格式。
+func openBookForDevtools(_ path: String) throws -> Book {
+    let url = URL(fileURLWithPath: path)
+    guard BookLoader.supports(url) else {
+        throw BookLoaderError.unsupportedFormat(url.pathExtension)
+    }
+    if BookLoader.isPlainText(url) {
+        let data = try Data(contentsOf: url)
+        let decoded = try TextDecoder.decode(data)
+        return TextBook(fileURL: url, rawText: decoded.text, encodingName: decoded.encodingName)
+    }
+    return try BookLoader.makeEpubBook(url: url)
+}
+
 // ── 开发者工具：把某本书的第一页离屏渲染成 PNG ──
 // 用法： Reader --render-page <book.txt> <out.png> [页码]
 // 不依赖窗口与屏幕截图，用于人工检查排版，后续也用于与 Windows 版做 parity 对比。
@@ -47,10 +63,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-page"),
     let dst = CommandLine.arguments[idx + 2]
     let pages = CommandLine.arguments.count > idx + 3 ? (Int(CommandLine.arguments[idx + 3]) ?? 0) : 0
     do {
-        let data = try Data(contentsOf: URL(fileURLWithPath: src))
-        let decoded = try TextDecoder.decode(data)
-        let book = TextBook(fileURL: URL(fileURLWithPath: src),
-                            rawText: decoded.text, encodingName: decoded.encodingName)
+        let book = try openBookForDevtools(src)
         let view = ReadingView(frame: NSRect(x: 0, y: 0, width: 420, height: 660))
         // 离屏渲染时视图不在窗口里，effectiveAppearance 取不到 app 的外观，
         // 所以预览要显式指定（真实运行时靠 effectiveAppearance 自动跟随系统）
@@ -119,7 +132,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-page"),
         try png.write(to: URL(fileURLWithPath: dst))
         let c = book.chapters.count
         FileHandle.standardError.write(
-            "已渲染第 \(pages + 1) 页 → \(dst)\n编码=\(decoded.encodingName) 总字数=\(book.units.count) 章节数=\(c) 本页偏移=\(view.page.start)..\(view.page.end)\n"
+            "已渲染第 \(pages + 1) 页 → \(dst)\n格式=\(book.encodingName) 总字数=\(book.units.count) 章节数=\(c) 本页偏移=\(view.page.start)..\(view.page.end)\n"
                 .data(using: .utf8)!)
         exit(0)
     } catch {
@@ -178,9 +191,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--dump-pages"),
     let w = CommandLine.arguments.count > idx + 2 ? (Double(CommandLine.arguments[idx + 2]) ?? 420) : 420
     let h = CommandLine.arguments.count > idx + 3 ? (Double(CommandLine.arguments[idx + 3]) ?? 660) : 660
     do {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        let decoded = try TextDecoder.decode(data)
-        let book = TextBook(fileURL: URL(fileURLWithPath: path), rawText: decoded.text, encodingName: decoded.encodingName)
+        let book = try openBookForDevtools(path)
         let view = ReadingView(frame: NSRect(x: 0, y: 0, width: w, height: h))
         view.book = book
         var out = "page\tstart\tlength\tlines\tchapter\n"
@@ -213,10 +224,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--dump-chapters"),
    CommandLine.arguments.count > idx + 1 {
     let path = CommandLine.arguments[idx + 1]
     do {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        let decoded = try TextDecoder.decode(data)
-        let book = TextBook(fileURL: URL(fileURLWithPath: path),
-                            rawText: decoded.text, encodingName: decoded.encodingName)
+        let book = try openBookForDevtools(path)
         var out = "index\toffset\ttitle_len\ttitle\n"
         out.reserveCapacity(book.chapters.count * 48)
         for (i, ch) in book.chapters.enumerated() {
@@ -892,6 +900,113 @@ if CommandLine.arguments.contains("--toc-selftest") {
     }
 
     log(failures == 0 ? "✅ 目录自检全部通过" : "❌ 目录自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// ── 开发者工具：EPUB 原型自检（M7）──
+// 验证路线图 M7 的验收：一本公开版权 EPUB 能读到正文、章节表正确、进度可记忆，
+// 不引入第三方依赖、`.cache.dat` 不变。夹具 samples/古文观止.epub 由
+// tools/make-epub-sample.py 从同名 TXT 生成（mimetype 不压缩 + container/OPF/spine）。
+if CommandLine.arguments.contains("--epub-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+
+    // 仓库根：优先当前目录（命令行一般从仓库根跑）；否则从 .app 位置推
+    // （dist/Reader.app → 上一级 dist → 再上一级仓库根），这样 verify.sh 在任何 cwd 都能跑。
+    var root = FileManager.default.currentDirectoryPath
+    if !FileManager.default.fileExists(atPath: root + "/samples/古文观止.epub") {
+        let repoRoot = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        root = repoRoot.path
+    }
+    let epubURL = URL(fileURLWithPath: root + "/samples/古文观止.epub")
+    let txtURL = URL(fileURLWithPath: root + "/samples/古文观止.txt")
+    check(FileManager.default.fileExists(atPath: epubURL.path), "夹具存在", epubURL.path)
+
+    // 1) 格式分派
+    check(BookLoader.supports(epubURL), "BookLoader 认得 .epub")
+    check(BookLoader.supports(txtURL), "BookLoader 仍然认得 .txt")
+    check(!BookLoader.supports(URL(fileURLWithPath: root + "/README.md")), "不支持的格式被挡下")
+    check(BookLoader.isPlainText(txtURL) && !BookLoader.isPlainText(epubURL), "TXT / EPUB 分派正确")
+
+    // 2) 解包 + 解析
+    do {
+        let book = try BookLoader.makeEpubBook(url: epubURL)
+        check(book.encodingName == "EPUB", "状态栏格式名是 EPUB")
+        check(book.displayName == "古文观止（示例）", "书名取 OPF 的 dc:title", book.displayName)
+        check(book.chapters.count == 3, "spine 3 条 → 3 章", "实际 \(book.chapters.count)")
+        check(book.units.count > 500, "正文读出来了", "\(book.units.count) 码元")
+        check(book.findText.length == book.units.count, "搜索缓存长度与正文一致")
+        check(!book.supportsEditing, "EPUB 是只读格式（编辑菜单会灰）")
+        let text = String(decoding: book.units, as: UTF16.self)
+        check(text.contains("桃花源记"), "正文含第一章标题")
+        check(text.contains("晋太元中"), "正文含第一章内容")
+        check(book.chapters.allSatisfy { !$0.title.isEmpty }, "每章都有标题")
+        if let first = book.chapters.first {
+            check(first.title == "第一章 桃花源记", "章节标题取 <h1>", first.title)
+            check(first.titleLength > 0, "标题长度 > 0（标题字体能生效）", "\(first.titleLength)")
+            check(book.isChapterStart(at: first.index), "章节起点可识别")
+            check(book.isChapterTitle(at: first.index), "标题首字算标题")
+            check(book.chapterIndex(at: first.index) == 0, "chapterIndex 命中第 1 章")
+            check(first.index + first.titleLength <= book.units.count, "标题区间不越界")
+        }
+        var monotonic = true
+        for i in 1..<book.chapters.count where book.chapters[i].index <= book.chapters[i - 1].index {
+            monotonic = false
+        }
+        check(monotonic, "章节偏移严格递增")
+
+        // 3) 分页：能排版、能跳章、能翻页
+        let view = ReadingView(frame: NSRect(x: 0, y: 0, width: 420, height: 660))
+        view.book = book
+        check(view.page.end > 0, "EPUB 正文能分页", "本页偏移 \(view.page.start)..\(view.page.end)")
+        if book.chapters.count >= 3 {
+            view.jump(to: book.chapters[2].index)
+            check(view.page.start == book.chapters[2].index, "能跳到第 3 章起点")
+            view.goPrevPage()
+            check(view.page.start >= 0, "能往前翻")
+        }
+    } catch {
+        check(false, "EPUB 解析成功", "\(error)")
+    }
+
+    // 4) 走真实打开路径：章节数 / 书名 / 进度记忆
+    delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    delegate.openSynchronously(url: epubURL)
+    check(delegate.debugChapterCount == 3, "AppDelegate 打开 EPUB 后章节数 = 3", "\(delegate.debugChapterCount)")
+    check(delegate.debugBookLen > 0, "AppDelegate 打开 EPUB 后正文非空", "\(delegate.debugBookLen)")
+    check(delegate.debugWindowTitle.contains("古文观止（示例）"), "窗口标题是 EPUB 书名", delegate.debugWindowTitle)
+
+    if let book = try? BookLoader.makeEpubBook(url: epubURL), book.chapters.count >= 2 {
+        let secondIndex = book.chapters[1].index
+        // 目录菜单：[0] 跳转到章节…、[1] 分隔线、[2...] 章节
+        var clicked = false
+        for position in 2..<(book.chapters.count + 2) {
+            guard let item = delegate.debugTOCMenuItem(at: position), item.tag == 1 else { continue }
+            if let action = item.action {
+                NSApp.sendAction(action, to: item.target, from: item)
+                clicked = true
+            }
+            break
+        }
+        check(clicked, "能通过目录菜单点到第 2 章")
+        check(delegate.debugPageStart == secondIndex, "点第 2 章后页首偏移正确",
+              "实际 \(delegate.debugPageStart) 期望 \(secondIndex)")
+
+        // 重开同一本：应该回到上次读到的第 2 章（进度存在 .cache.dat 里，与格式无关）
+        delegate.openSynchronously(url: epubURL)
+        check(delegate.debugPageStart == secondIndex, "★ 重开后回到上次位置（EPUB 进度可记忆）",
+              "实际 \(delegate.debugPageStart) 期望 \(secondIndex)")
+    }
+
+    log(failures == 0 ? "✅ EPUB 自检全部通过" : "❌ EPUB 自检失败 \(failures) 项")
     exit(failures == 0 ? 0 : 1)
 }
 

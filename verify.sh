@@ -166,10 +166,22 @@ if [ "$SHORTCUT_CODE" -ne 0 ]; then
     echo "  ❌ 快捷键自检失败（退出码 $SHORTCUT_CODE）"; cat "$OUT/shortcut.log"; exit 1
 fi
 
+step "4.15/5 EPUB 原型自检（解包 / OPF / 正文提取 / 章节表 / 进度可记忆）"
+set +e
+"$BIN" --epub-selftest >"$OUT/epub.log" 2>&1
+EPUB_CODE=$?
+set -e
+grep -E "✅|❌" "$OUT/epub.log" | sed 's/^/  /'
+if [ "$EPUB_CODE" -ne 0 ]; then
+    echo "  ❌ EPUB 自检失败（退出码 $EPUB_CODE）"; cat "$OUT/epub.log"; exit 1
+fi
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-find.png" 0 --find "之" 2>&1 | tail -1
+# EPUB 原型（M7）：同一本书的 EPUB 版应该和 TXT 版排出同样的观感
+"$BIN" --render-page "$ROOT/samples/古文观止.epub" "$OUT/page-epub.png" 0 2>&1 | tail -1
 # 章节标题独立字体（M3）：同一页换标题字体各渲一张，肉眼对比用
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-title-same.png" 0 2>&1 | tail -1
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-title-separate.png" 0 \

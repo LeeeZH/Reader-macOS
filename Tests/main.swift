@@ -2248,8 +2248,7 @@ eq(emptyStub.totalLength, 0, "空书 totalLength = 0")
 
 // BookLoader：唯一加载入口 + 书架字数口径
 check(BookLoader.supports(protoURL), "BookLoader 认得 .txt")
-check(!BookLoader.supports(tmp.appendingPathComponent("a.epub")),
-      "★ 暂不支持 .epub（M7 再接，现在不能假装能读）")
+check(BookLoader.supports(tmp.appendingPathComponent("a.epub")), "★ .epub 已支持（M7 原型）")
 check(!BookLoader.supports(tmp.appendingPathComponent("a.md")), ".md 不在支持列表里")
 eq(BookLoader.totalLength(ofFileAt: protoURL) ?? -1, protoBook.totalLength,
    "★ 书架算的总字数与 ReadingView 口径一致")
@@ -2260,6 +2259,142 @@ let loadedBook = BookLoader.makeBook(url: protoURL,
                                      chapterRule: ChapterRule())
 eq(loadedBook.totalLength, protoBook.totalLength, "BookLoader.makeBook 得到同一本书")
 eq(loadedBook.chapters.count, protoBook.chapters.count, "makeBook 的章节表一致")
+
+// ============ 30. EPUB（原型：解包 / OPF / 正文提取 / 章节表） ============
+print("\n[30] EPUB 原型")
+
+// 30.1 HTML → 段落（EPUB 专用的提取 / 规范化，不复用 FormatText）
+let epubParas1 = EpubText.paragraphs(fromHTML: "<h1>第一章 桃花源记</h1><p>晋太元中，武陵人捕鱼为业。</p>")
+eq(epubParas1.count, 2, "标题 + 正文 → 2 段")
+check(epubParas1[0].isHeading, "h1 标记为标题")
+eq(epubParas1[0].text, "第一章 桃花源记", "★ 同一行里的空格保留（标题词间）")
+eq(epubParas1[1].text, "晋太元中，武陵人捕鱼为业。", "段落文字正确")
+
+let epubParas2 = EpubText.paragraphs(fromHTML: "<p>有<b>粗体</b>和<i>斜体</i></p>")
+eq(epubParas2.count, 1, "行内标签不切段")
+eq(epubParas2[0].text, "有粗体和斜体", "行内标签文字拼接无多余空格")
+
+let epubParas3 = EpubText.paragraphs(fromHTML: "<p>第一行\n第二行</p><p>第一章 桃花源记</p>")
+eq(epubParas3.count, 2, "两个 p 各一段")
+eq(epubParas3[0].text, "第一行第二行", "★ 源码换行在中文之间不落空格")
+eq(epubParas3[1].text, "第一章 桃花源记", "★ 同一行的空格保留")
+
+eq(EpubText.paragraphs(fromHTML: "<p>a<br/>b</p>").map(\.text), ["a", "b"], "br 断行")
+eq(EpubText.paragraphs(fromHTML: "<div>甲</div><div>乙</div>").map(\.text), ["甲", "乙"], "div 分段")
+
+let epubParas4 = EpubText.paragraphs(fromHTML: "<p>&amp; &#x4E2D; &#25991; &lt;tag&gt;</p>")
+eq(epubParas4.first?.text ?? "", "& 中 文 <tag>", "实体解码")
+eq(EpubText.paragraphs(fromHTML: "<style>.x{}</style><p>正文</p><script>alert(1)</script>").map(\.text),
+   ["正文"], "style / script 整个丢弃")
+eq(EpubText.paragraphs(fromHTML: "<p><ruby>汉<rt>hàn</rt></ruby>字</p>").map(\.text),
+   ["汉字"], "注音 rt 丢弃，只留基字")
+eq(EpubText.paragraphs(fromHTML: "<!-- 注释 --><p>正文</p>").map(\.text), ["正文"], "HTML 注释忽略")
+
+// 30.2 造一个最小 EPUB（container.xml + OPF + 2 个 XHTML）
+let epubTree = tmp.appendingPathComponent("epub-tree")
+try? FileManager.default.removeItem(at: epubTree)
+try FileManager.default.createDirectory(at: epubTree.appendingPathComponent("META-INF"),
+                                        withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: epubTree.appendingPathComponent("OEBPS"),
+                                        withIntermediateDirectories: true)
+
+let containerXML = """
+<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+try containerXML.write(to: epubTree.appendingPathComponent("META-INF/container.xml"),
+                       atomically: true, encoding: .utf8)
+
+let opfXML = """
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">test-book</dc:identifier>
+    <dc:title>测试书</dc:title>
+    <dc:language>zh-CN</dc:language>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="cover" href="cover.png" media-type="image/png"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+  </spine>
+</package>
+"""
+try opfXML.write(to: epubTree.appendingPathComponent("OEBPS/content.opf"),
+                 atomically: true, encoding: .utf8)
+try "<html><body><h1>第一章 开始</h1><p>正文一</p></body></html>"
+    .write(to: epubTree.appendingPathComponent("OEBPS/ch1.xhtml"), atomically: true, encoding: .utf8)
+try "<html><body><p>只有正文</p></body></html>"
+    .write(to: epubTree.appendingPathComponent("OEBPS/ch2.xhtml"), atomically: true, encoding: .utf8)
+
+let parsedEpub = try EpubParser.load(extractedRoot: epubTree,
+                                     bookURL: tmp.appendingPathComponent("测试书.epub"))
+eq(parsedEpub.displayName, "测试书", "书名取 OPF 的 dc:title")
+eq(parsedEpub.chapters.count, 2, "spine 2 条 → 2 章（图片条目被跳过）")
+eq(parsedEpub.chapters[0].title, "第一章 开始", "第一章标题取 h1")
+eq(parsedEpub.chapters[1].title, "第 2 节", "没有 h1 的章节用「第 N 节」兜底")
+check(parsedEpub.chapters[0].titleLength > 0, "有标题时 titleLength > 0（标题字体能生效）")
+eq(parsedEpub.chapters[1].titleLength, 0, "无标题时 titleLength = 0")
+let expectedSecondIndex = "第一章 开始\n\n正文一\n".utf16.count
+eq(parsedEpub.chapters[1].index, expectedSecondIndex, "第二章偏移 = 第一章正文长度")
+eq(parsedEpub.totalLength, parsedEpub.units.count, "总长度 = 规范化后的码元数")
+check(parsedEpub.isChapterStart(at: parsedEpub.chapters[1].index), "第二章起点可识别")
+check(parsedEpub.isChapterTitle(at: parsedEpub.chapters[0].index), "标题首字算标题")
+eq(parsedEpub.chapterIndex(at: parsedEpub.chapters[1].index), 1, "chapterIndex 命中第 2 章")
+check(String(decoding: parsedEpub.units, as: UTF16.self).contains("只有正文"), "正文拼接正确")
+
+// 30.3 ZIP：ditto 解包 → 临时目录用完即删
+let epubZip = tmp.appendingPathComponent("测试书.epub")
+let packer = Process()
+packer.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+packer.currentDirectoryURL = epubTree
+packer.arguments = ["-c", "-k", ".", epubZip.path]
+try packer.run()
+packer.waitUntilExit()
+eq(packer.terminationStatus, 0, "夹具 zip 打包成功")
+
+var extractedRoot: URL?
+let firstChapterText = try ZipArchive.withExtractedTree(epubZip) { root -> String in
+    extractedRoot = root
+    let file = try ZipArchive.requireEntry(root, "OEBPS/ch1.xhtml")
+    return try String(contentsOf: file, encoding: .utf8)
+}
+check(firstChapterText.contains("第一章"), "zip 解出来的 XHTML 内容正确")
+check(extractedRoot.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false,
+      "★ 解包临时目录用完即删（不残留）")
+do {
+    _ = try ZipArchive.requireEntry(epubTree, "不存在.xhtml")
+    check(false, "缺少条目应该报错")
+} catch {
+    check(true, "缺少条目抛出可读错误")
+}
+
+// 30.4 BookLoader 分发 + 端到端读一本书
+check(BookLoader.supports(epubZip), "BookLoader 认得 .epub")
+check(!BookLoader.supports(tmp.appendingPathComponent("a.pdf")), ".pdf 不在支持列表里")
+check(BookLoader.isPlainText(epubZip) == false, "EPUB 不走纯文本解码")
+eq(BookLoader.totalLength(ofFileAt: epubZip), nil, "EPUB 不做书架预扫描（打开后回填）")
+let epubBook = try BookLoader.makeEpubBook(url: epubZip)
+eq(epubBook.encodingName, "EPUB", "格式名是 EPUB")
+eq(epubBook.chapters.count, 2, "BookLoader 读出的章节数一致")
+eq(epubBook.findText.length, epubBook.units.count, "搜索缓存长度与正文一致")
+check(!epubBook.supportsEditing, "EPUB 是只读格式")
+
+// 30.5 复用同一套分页：EPUB 正文也能排页、按章节跳转
+let epubView = ReadingView(frame: NSRect(x: 0, y: 0, width: 320, height: 500))
+epubView.book = epubBook
+check(epubView.page.end > 0, "EPUB 正文能分页")
+epubView.jump(to: epubBook.chapters[1].index)
+eq(epubView.page.start, epubBook.chapters[1].index, "能跳到 EPUB 第 2 章起点")
+epubView.book = nil
 
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))

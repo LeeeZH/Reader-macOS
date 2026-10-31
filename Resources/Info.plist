@@ -26,6 +26,13 @@
             <key>LSItemContentTypes</key>
             <array><string>public.plain-text</string></array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>EPUB 电子书</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array><string>org.idpf.epub-container</string></array>
+        </dict>
     </array>
 </dict>
 </plist>

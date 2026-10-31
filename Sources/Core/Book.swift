@@ -85,12 +85,33 @@ extension Book {
 
 // MARK: - 格式分发
 
-/// 书籍加载的唯一入口。目前只有 TXT；EPUB（M7）接在这里，
-/// 这样 AppDelegate / 书架就不需要各自 `if 后缀 == "txt"`。
+/// 书籍加载的唯一入口。现在支持 TXT（`TextBook`）与 EPUB（`EpubBook`，原型），
+/// 以后加格式只改这里，`AppDelegate` / 书架不需要各自判断后缀。
+enum BookLoaderError: Error, CustomStringConvertible {
+    case unsupportedFormat(String)
+
+    var description: String {
+        switch self {
+        case .unsupportedFormat(let ext):
+            let shown = ext.isEmpty ? "未知格式" : ".\(ext)"
+            return "暂不支持 \(shown) 格式。现在可以打开 .txt 和 .epub 文件。"
+        }
+    }
+}
+
 enum BookLoader {
-    /// 这个路径是不是我们支持的格式。以后支持 EPUB 时在这里加。
-    static func supports(_ url: URL) -> Bool {
+
+    /// 纯文本（走 `TextDecoder` + `FormatText` 那条路）
+    static func isPlainText(_ url: URL) -> Bool {
         url.pathExtension.lowercased() == "txt"
+    }
+
+    /// 这个路径是不是我们支持的格式（打开面板 / 拖拽 / 命令行共用）。
+    static func supports(_ url: URL) -> Bool {
+        switch url.pathExtension.lowercased() {
+        case "txt", "epub": return true
+        default: return false
+        }
     }
 
     /// 把已解码的文本做成书（解码本身留在 AppDelegate：打开耗时要分阶段打点）。
@@ -99,10 +120,21 @@ enum BookLoader {
                  encodingName: decoded.encodingName, chapterRule: chapterRule)
     }
 
+    /// 打开 EPUB（解包 → 解析 → 拼正文 + 章节表）。同步阻塞，调用方负责放后台。
+    static func makeEpubBook(url: URL) throws -> Book {
+        try ZipArchive.withExtractedTree(url) { root in
+            try EpubParser.load(extractedRoot: root, bookURL: url)
+        }
+    }
+
     /// 只为了书架百分比而算总字数（不解章节、不建搜索缓存）。
     /// 口径必须和 `ReadingView` 一致：`FormatText` 之后的 UTF-16 码元数。
+    ///
+    /// EPUB 原型**不做**预扫描（解包 + 解析一本要几百毫秒，书架一次预取几十本会拖太慢）：
+    /// 打开过的书由 `LibraryStore.seedLength` 回填，没打开过的先显示字符偏移。
     static func totalLength(ofFileAt url: URL) -> Int? {
-        guard let data = try? Data(contentsOf: url),
+        guard isPlainText(url),
+              let data = try? Data(contentsOf: url),
               let decoded = try? TextDecoder.decode(data) else { return nil }
         return TextNormalizer.format(Array(decoded.text.utf16)).count
     }

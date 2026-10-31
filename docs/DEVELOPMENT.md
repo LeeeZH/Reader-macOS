@@ -302,12 +302,17 @@ $B --shortcut-selftest
       `ReadingView` / 查找 / 章节搜索 / 书签面板 / 打开流程都面向协议，
       `BookLoader` 是唯一加载入口；协议扩展给出章节偏移的默认实现，
       新格式只提供 `units` / `chapters` 即可。存档仍然只存路径 + 字符偏移
+- [x] **EPUB（原型，0.3.0）**：零依赖解包（系统 `ditto`）+ container.xml / OPF /
+      spine 解析，纯文字正文一个 spine 一条章节；`EpubText` 独立于 `FormatText`
+      （实体 / 注音 / 脚本清理，中文折行不落空格）；能分页 / 搜索 / 书签 / 记进度，
+      编辑模式对只读格式自动置灰。限制见[路线图 M7](ROADMAP.md#m7-epub原型已跑通030-待发版)
 - [x] **触控栏支持**：翻页 / 进度 / 换章（上/下一章）/ 书签 / 字号，两侧 popover 收纳长尾操作
 
 尚未实现（进度与顺序看 [路线图](ROADMAP.md)，这里只列结论）：
 
-- [ ] 在线书源（需要先改「完全离线」的产品承诺）、EPUB（书籍抽象 `Book` 协议已完成；
-      还差零依赖 ZIP 原型 + EPUB 专用文本规范化，见路线图 M7），MOBI 放弃
+- [ ] 在线书源（需要先改「完全离线」的产品承诺）、MOBI（放弃）
+- [ ] EPUB 后续：图片 / 样式 / 注音、`nav.xhtml` / `toc.ncx` 目录、更快的解包
+      （现在的原型只读纯文字，限制写在路线图 M7）
 
 ---
 
@@ -323,6 +328,7 @@ Reader/
 ├── Resources/Info.plist      Bundle 配置
 ├── samples/古文观止.txt           样书（3 章，UTF-8）
 ├── samples/古文观止-GBK.txt       同一本样书的 GBK 编码版
+├── samples/古文观止.epub          同一本样书的 EPUB 版（EPUB 自检夹具）
 ├── samples/golden-pages.tsv  分页基准快照（parity 回归用）
 ├── samples/bg-tile.png       背景图渲染夹具（48×48，检查平铺原点 / 镜像方向）
 ├── docs/DEVELOPMENT.md       开发笔记（本文件）
@@ -330,6 +336,7 @@ Reader/
 ├── docs/images/               README 用的界面截图
 ├── Tests/main.swift          单测入口
 ├── tools/MakeIcon.swift      图标生成
+├── tools/make-epub-sample.py 生成 samples/古文观止.epub（开发用，不参与构建）
 ├── .vscode/                  tasks / launch / settings
 └── Sources/
     ├── main.swift            入口（+ 全部 `--render-*` / `--*-selftest` 开发工具）
@@ -348,6 +355,9 @@ Reader/
     │   ├── ChapterSearch.swift   章节搜索（数字 / 中文数字 / 标题模糊）
     │   ├── TextSearch.swift      全文搜索（NSString 匹配 + 非重叠 + 上限）
     │   ├── Book.swift        `Book` 协议 + `BookLoader`（格式分发）+ `TextBook`
+    │   ├── ZipArchive.swift     零依赖 ZIP：`ditto` 解到临时目录，用完即删（EPUB 用）
+    │   ├── EpubText.swift       EPUB 的 HTML → 段落（独立于 FormatText）
+    │   ├── EpubParser.swift     EPUB：container.xml → OPF → spine → `EpubBook`
     │   ├── JSONValue.swift   保序 JSON + 类型化访问器
     │   ├── CacheDocument.swift  `.cache.dat` 47 键 schema
     │   ├── LibraryStore.swift   存档读写 / 书架 / 进度 / 书签
@@ -647,6 +657,45 @@ floating 窗口，所以主窗口浮起来之后，设置窗口会被自家主�
 单测 `[29] 书籍协议 Book` 钉住：TXT 通过协议暴露的语义不变、协议扩展的默认实现
 与 `TextBook` 逐偏移一致、只读格式默认不能编辑、`BookLoader` 的字数口径与
 `ReadingView` 一致。
+
+---
+
+### 13. EPUB 原型：为什么用 `ditto` 解包、为什么不复用 `FormatText`
+
+M7 的实现是**原型级**：先证明「EPUB 值不值得做」这个方向成立，再决定要不要
+自己写 inflate。结论是值得 —— 纯文本 EPUB 已经能正常读，且没有引入任何依赖。
+
+- **ZIP**：`ZipArchive` 调 `/usr/bin/ditto -x -k` 解到临时目录（UUID 命名，
+  `defer` 删除）。好处是 DEFLATE / ZIP64 / 数据描述符 / 扩展属性全都不用管；
+  代价是解包期间会落盘（临时目录里是解压后的体积）。实测 Gutenberg 的
+  *Alice in Wonderland*（EPUB 134 KB、16.3 万码元）打开 + 解析约 **0.17s**
+  （含进程冷启动），所以暂时不值得为它引入 libz 的复杂度和风险。
+  以后书更大 / 更频繁打开时，再考虑用 libz 直接读中央目录 + inflate。
+- **HTML → 文本**：`EpubText` 是手写的标签扫描器（不是完整 HTML 解析器），
+  只做「提取可读正文」：丢弃 `script` / `style` / `head` / 注音 `rt` `rp`；
+  块级元素各成一段，`<br>` / `<hr>` 断行；实体解码。
+  - **为什么不复用 `FormatText`**：那套规则是为 **TXT 与 Windows 存档偏移兼容**
+    服务的（压缩空行、压前导空白、只认 `\r\n` / `\n`），套到 XHTML 上会把
+    `<p>` 之间的换行、实体、注音都弄坏。EPUB 正文先由 `EpubText` 规范成
+    「一段一行、段间空行」的纯文本，再交给同一个分页器 —— 坐标仍然是 UTF-16 码元。
+  - **折行空格**：XHTML 里中文常逐行硬折，源码换行产生的空白在中文之间直接丢弃
+    （否则每个汉字之间都会被塞一个空格）；**同一行里真正的空格要保留**
+    （「第一章 桃花源记」的词间空格是内容）。这条规则单测 `[30]` 钉住了。
+- **章节**：一个 spine 条目 = 一章，`chapters[i].index` 是累计码元偏移；
+  文档开头的 `<h1>`–`<h6>` 当章节标题（`titleLength` = 标题长度，于是标题字体 /
+  颜色对 EPUB 也生效），没有标题就「第 N 节」；图片 / 字体等非文本 spine 条目跳过。
+- **打开流程**：`BookLoader.isPlainText` 分派，EPUB 走 `makeEpubBook`（同步阻塞，
+  由 `openQueue` 放后台）。`.cache.dat` 只记路径 + 偏移，所以进度 / 书签开箱即用；
+  编辑模式按 `Book.supportsEditing` 自动置灰。
+- **书架长度**：`LibraryStore.prefetchLengths` 只预扫描 TXT（
+  `BookLoader.totalLength` 对 EPUB 返回 nil）。EPUB 打开一次后由
+  `seedLength` 回填；没打开过的先显示字符偏移 —— 预扫描一本要解包 + 解析，
+  几十本会把后台队列拖住，不值。
+- **夹具**：`samples/古文观止.epub` 由 `tools/make-epub-sample.py` 从同名 TXT 生成
+  （`mimetype` 不压缩且是第一个条目、`META-INF/container.xml` →
+  `OEBPS/content.opf`、一章一个 XHTML）。改样书后重新跑一次脚本即可，
+  `build.sh` 不依赖它。
+- **自检**：`$B --epub-selftest`（`verify.sh` 4.15 步）；单测 `[30]`。
 
 ---
 

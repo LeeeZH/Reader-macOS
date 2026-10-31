@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     var debugIsOpeningBook: Bool { isLoadingBook }
     var debugIsLoadingIndicatorVisible: Bool { loadingIndicator?.isHidden == false }
     var debugCurrentBookPath: String? { currentBookPath }
+    var debugWindowTitle: String { window?.title ?? "" }
     var debugChapterCount: Int { readingView?.book?.chapters.count ?? -1 }
     var debugPageStart: Int { readingView?.pageStart ?? -1 }
     var debugAutoPageActive: Bool { autoPageTimer != nil }
@@ -294,12 +295,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - 打开文件
 
+    /// 打开面板里额外允许的 EPUB 类型（`UTType(filenameExtension:)` 拿不到时为空，
+    /// 但 `allowsOtherFileTypes = true` 仍然能选到 .epub）
+    private var epubTypes: [UTType] {
+        [UTType(filenameExtension: "epub")].compactMap { $0 }
+    }
+
     @objc func openDocument(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.allowedContentTypes = [.plainText, .text, .log]
+        panel.allowedContentTypes = [.plainText, .text, .log] + epubTypes
         panel.allowsOtherFileTypes = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         open(url: url)
@@ -311,6 +318,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 主线程只做窗口/视图更新。对应原版 `Book::OpenBook` 起 worker 线程 +
     /// `PlayLoadingImage` 的做法：打开期间窗口保持可交互，不会白屏卡死。
     func open(url: URL, restoreOffset: Int? = nil) {
+        // 不认识的格式：直接提示，别进加载流程（拖进一个 .pdf 也不该白转圈）
+        guard BookLoader.supports(url) else {
+            presentOpenError(BookLoaderError.unsupportedFormat(url.pathExtension))
+            return
+        }
         // 正在编辑时先退出编辑（会走「保存 / 放弃 / 继续编辑」）。
         // 用户选「继续编辑」就取消这次打开，绝不出现「编辑器留在旧文本、
         // 底下书已经换了一本」的状态。
@@ -326,31 +338,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         beginLoadingUI(for: url)
 
         let settings = library.settings
+        let isText = BookLoader.isPlainText(url)
         // 打开耗时诊断：`READER_OPEN_TIMING=1 Reader file.txt` 时把各阶段耗时打到 stderr
         let timingEnabled = ProcessInfo.processInfo.environment["READER_OPEN_TIMING"] == "1"
         let requestStart = Date()
         openQueue.async { [weak self] in
             do {
                 let t0 = Date()
-                let data = try Data(contentsOf: url)
-                guard let self = self, self.isCurrentOpenRequest(requestID) else { return }
-                let t1 = Date()
-                let decoded = try TextDecoder.decode(data)
-                guard self.isCurrentOpenRequest(requestID) else { return }
-                let t2 = Date()
-                let book = BookLoader.makeBook(url: url, decoded: decoded,
+                let book: Book
+                let t1: Date
+                let t2: Date
+                let t3: Date
+                var byteCount = 0
+                if isText {
+                    let data = try Data(contentsOf: url)
+                    byteCount = data.count
+                    guard self?.isCurrentOpenRequest(requestID) == true else { return }
+                    t1 = Date()
+                    let decoded = try TextDecoder.decode(data)
+                    guard self?.isCurrentOpenRequest(requestID) == true else { return }
+                    t2 = Date()
+                    book = BookLoader.makeBook(url: url, decoded: decoded,
                                                chapterRule: settings.chapterRule)
-                guard self.isCurrentOpenRequest(requestID) else { return }
-                let t3 = Date()
-                if timingEnabled {
-                    FileHandle.standardError.write(String(
-                        format: "[open-timing] 后台启动 %.1fms · read %.1fms · decode %.1fms · format+parse %.1fms · bytes %d\n",
-                        t0.timeIntervalSince(requestStart) * 1000,
-                        t1.timeIntervalSince(t0) * 1000,
-                        t2.timeIntervalSince(t1) * 1000,
-                        t3.timeIntervalSince(t2) * 1000,
-                        data.count).data(using: .utf8)!)
+                    guard self?.isCurrentOpenRequest(requestID) == true else { return }
+                    t3 = Date()
+                } else {
+                    t1 = t0
+                    t2 = t0
+                    book = try BookLoader.makeEpubBook(url: url)
+                    guard self?.isCurrentOpenRequest(requestID) == true else { return }
+                    t3 = Date()
                 }
+                if timingEnabled {
+                    if isText {
+                        FileHandle.standardError.write(String(
+                            format: "[open-timing] 后台启动 %.1fms · read %.1fms · decode %.1fms · format+parse %.1fms · bytes %d\n",
+                            t0.timeIntervalSince(requestStart) * 1000,
+                            t1.timeIntervalSince(t0) * 1000,
+                            t2.timeIntervalSince(t1) * 1000,
+                            t3.timeIntervalSince(t2) * 1000,
+                            byteCount).data(using: .utf8)!)
+                    } else {
+                        FileHandle.standardError.write(String(
+                            format: "[open-timing] 后台启动 %.1fms · EPUB 解包+解析 %.1fms · 正文 %d 码元 · %d 章\n",
+                            t0.timeIntervalSince(requestStart) * 1000,
+                            t3.timeIntervalSince(t0) * 1000,
+                            book.units.count,
+                            book.chapters.count).data(using: .utf8)!)
+                    }
+                }
+                guard let self = self else { return }
                 DispatchQueue.main.async {
                     guard self.isCurrentOpenRequest(requestID) else { return }
                     let t4 = Date()
@@ -392,10 +429,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         readingView.onProgressChange = nil
         do {
-            let data = try Data(contentsOf: url)
-            let decoded = try TextDecoder.decode(data)
-            let book = BookLoader.makeBook(url: url, decoded: decoded,
+            let book: Book
+            if BookLoader.isPlainText(url) {
+                let data = try Data(contentsOf: url)
+                let decoded = try TextDecoder.decode(data)
+                book = BookLoader.makeBook(url: url, decoded: decoded,
                                            chapterRule: library.settings.chapterRule)
+            } else {
+                book = try BookLoader.makeEpubBook(url: url)
+            }
             apply(book: book, url: url, restoreOffset: restoreOffset)
         } catch {
             if readingView.book != nil { attachProgressCallback() }
