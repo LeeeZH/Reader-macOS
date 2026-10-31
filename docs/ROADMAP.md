@@ -28,7 +28,7 @@
 | M3 | 章节标题独立字体 / 颜色 | ✅ 已完成 | 中 |
 | M4 | 背景图片（拉伸 / 平铺 / 平铺翻转） | ✅ 已完成 | 小 |
 | M5 | 快捷键自定义（设置 → 快捷键） | ✅ 已完成 | 中 |
-| M6 | 0.2.0 发版 | ⏳ 待做（M1–M5 已完成） | 小 |
+| M6 | 0.2.0 发版 | 🔄 已打包，待上传 GitHub | 小 |
 | M7 | EPUB | 💤 押后 | 大 |
 | M8 | 在线书源 | 🚫 暂不做（需产品决策） | 大 |
 | — | Intel / 公证 / 自动更新 | — | 见「明确不做」 |
@@ -225,9 +225,19 @@ Mac 版不能反而更差。
 
 ---
 
-## M6 0.2.0 发版
+## M6 0.2.0 发版（已打包，待上传）
 
 M1–M5 一起出包。步骤严格照 [开发笔记「发版」](DEVELOPMENT.md#发版release)：
+
+**当前状态（2026-10-31）**：包已打好，等上传。
+
+- `dist/Reader-0.2.0-macos-arm64.zip`（703 KB）
+- `dist/SHA256SUMS.txt`：`1df9a8ced4e346eb174430e7c3fa47e0c35c0d9dbec75a9a7e5dcd87368d31b5`
+- 已做：版本号 0.2.0 / build 3、`./verify.sh` 全绿、ditto 打包、
+  解压后 `codesign --verify --deep --strict` 通过、包内版本与架构（arm64）核对、
+  用包内二进制渲染 + 快捷键自检冒烟
+- 待做：打 `v0.2.0` tag 推送 → Release 上传 zip + SHA256SUMS → 用 README 永久链接
+  下载回来核对 SHA256
 
 1. `Resources/Info.plist`：`0.1.1 → 0.2.0`、`CFBundleVersion 2 → 3`
    （README 里的下载链接、文末版本号、Release 说明同步）。

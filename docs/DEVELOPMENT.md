@@ -823,8 +823,8 @@ macOS 镜像与本地环境不一致，两次都挂在构建阶段，于是撤�
 `Resources/Info.plist`：
 
 ```xml
-<key>CFBundleShortVersionString</key><string>0.1.1</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>3</string>
 ```
 
 下面所有命令里的版本号都**从 plist 读**，不要手抄。
