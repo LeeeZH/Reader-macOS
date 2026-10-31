@@ -303,6 +303,15 @@ final class LibraryStore {
     /// 已经算过总字数的书籍数量（用于限制后台预取的总量）
     var cachedLengthCount: Int { lengthCache.count }
 
+    /// 打开成功后把已知的总字数直接回填进缓存。
+    ///
+    /// 否则书架窗口的 `prefetchLengths` 会为了同一个数字，把刚打开的整本书
+    /// 再 `Data + decode + format` 一遍（47MB 文件要多花几百毫秒后台 CPU）。
+    func seedLength(_ length: Int, forStoredPath path: String) {
+        guard length > 0 else { return }
+        lengthCache[path] = length
+    }
+
     /// 后台按文件名搜索缺失的文件。**昂贵，绝不能在渲染路径上调用。**
     func searchMissingFiles(completion: @escaping (Int) -> Void) {
         let targets = document.items.filter { availableURL(forStoredPath: $0.fileName) == nil }

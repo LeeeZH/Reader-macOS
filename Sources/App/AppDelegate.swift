@@ -44,8 +44,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 当前打开的书在本机的路径（用来判断它是否被从阅读列表里移除了）
     private var currentBookPath: String?
 
+    // MARK: - 异步打开（对应原版 Book::OpenBook 的后台线程）
+
+    /// 打开请求序号。连续快速打开多本时，只有最后一次的结果允许上屏
+    /// （原版靠 ForceKill 杀旧线程，这里用序号丢弃过期结果，更安全）。
+    private var openRequestID = 0
+    /// 序号会被主线程（递增）和后台线程（只读判断是否过期）同时访问，加锁。
+    private let openRequestLock = NSLock()
+    /// 把「读文件 → 解码 → 规范化 → 章节解析」整段放到后台。
+    private let openQueue = DispatchQueue(label: "reader.open-book", qos: .userInitiated)
+    /// 正在打开：转圈指示器 + 状态栏提示（对应原版 PlayLoadingImage）。
+    private var isLoadingBook = false
+    /// 正在加载的是哪本书（用于 closeCurrentBook 判断该不该取消这次打开）
+    private var loadingBookPath: String?
+    private var loadingIndicator: NSProgressIndicator?
+    private var statusBeforeLoading: String?
+    private var titleBeforeLoading: String?
+    /// 编辑模式当前编辑的是哪本书 —— 保存时按这个身份写回，
+    /// 不能读 `readingView.book`（异步换书期间它可能已经是另一本了）。
+    private var editingBook: TextBook?
+
+    /// 开一个新的打开请求，返回它的序号（主线程调用）。
+    private func advanceOpenRequestID() -> Int {
+        openRequestLock.lock()
+        defer { openRequestLock.unlock() }
+        openRequestID &+= 1
+        return openRequestID
+    }
+
+    /// 这个请求是否仍然是最新的一次打开（后台线程也会调）。
+    private func isCurrentOpenRequest(_ id: Int) -> Bool {
+        openRequestLock.lock()
+        defer { openRequestLock.unlock() }
+        return openRequestID == id
+    }
+
     /// 自检用只读探针
+    var debugIsOpeningBook: Bool { isLoadingBook }
+    var debugIsLoadingIndicatorVisible: Bool { loadingIndicator?.isHidden == false }
     var debugCurrentBookPath: String? { currentBookPath }
+    var debugChapterCount: Int { readingView?.book?.chapters.count ?? -1 }
     var debugPageStart: Int { readingView?.pageStart ?? -1 }
     var debugAutoPageActive: Bool { autoPageTimer != nil }
     var debugAutoPageInterval: TimeInterval { autoPageInterval }
@@ -223,6 +261,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         readingView.onMinimizeWindow = { [weak self] in self?.window?.miniaturize(nil) }
         content.addSubview(readingView)
 
+        // 打开大文件时的转圈指示器，浮在阅读区正中（对应原版打开时的 loading 动画）。
+        // 平时 hidden + 停动画，完全不可见。
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+        spinner.isHidden = true
+        spinner.frame = NSRect(x: readingView.bounds.midX - 12,
+                               y: readingView.bounds.midY - 12,
+                               width: 24, height: 24)
+        spinner.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
+        content.addSubview(spinner)
+        loadingIndicator = spinner
+
         window.contentView = content
 
         // ── 触控栏（仅带 Touch Bar 的机型可见，其它机型上是安全空操作）──
@@ -249,53 +302,187 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         open(url: url)
     }
 
+    /// 打开一本书（异步）。
+    ///
+    /// 「读文件 → 解码 → 规范化 → 章节解析」是 CPU 密集的全量工作，必须放后台，
+    /// 主线程只做窗口/视图更新。对应原版 `Book::OpenBook` 起 worker 线程 +
+    /// `PlayLoadingImage` 的做法：打开期间窗口保持可交互，不会白屏卡死。
     func open(url: URL, restoreOffset: Int? = nil) {
+        // 正在编辑时先退出编辑（会走「保存 / 放弃 / 继续编辑」）。
+        // 用户选「继续编辑」就取消这次打开，绝不出现「编辑器留在旧文本、
+        // 底下书已经换了一本」的状态。
+        if editorTextView != nil {
+            exitEditMode()
+            if editorTextView != nil { return }
+        }
+        let requestID = advanceOpenRequestID()
         // 换书过程中先摘掉进度回调，避免把 A 书的偏移写到 B 书头上
+        readingView.onProgressChange = nil
+        isLoadingBook = true
+        loadingBookPath = url.path
+        beginLoadingUI(for: url)
+
+        let settings = library.settings
+        // 打开耗时诊断：`READER_OPEN_TIMING=1 Reader file.txt` 时把各阶段耗时打到 stderr
+        let timingEnabled = ProcessInfo.processInfo.environment["READER_OPEN_TIMING"] == "1"
+        let requestStart = Date()
+        openQueue.async { [weak self] in
+            do {
+                let t0 = Date()
+                let data = try Data(contentsOf: url)
+                guard let self = self, self.isCurrentOpenRequest(requestID) else { return }
+                let t1 = Date()
+                let decoded = try TextDecoder.decode(data)
+                guard self.isCurrentOpenRequest(requestID) else { return }
+                let t2 = Date()
+                let book = TextBook(fileURL: url, rawText: decoded.text,
+                                    encodingName: decoded.encodingName,
+                                    chapterRule: settings.chapterRule)
+                guard self.isCurrentOpenRequest(requestID) else { return }
+                let t3 = Date()
+                if timingEnabled {
+                    FileHandle.standardError.write(String(
+                        format: "[open-timing] 后台启动 %.1fms · read %.1fms · decode %.1fms · format+parse %.1fms · bytes %d\n",
+                        t0.timeIntervalSince(requestStart) * 1000,
+                        t1.timeIntervalSince(t0) * 1000,
+                        t2.timeIntervalSince(t1) * 1000,
+                        t3.timeIntervalSince(t2) * 1000,
+                        data.count).data(using: .utf8)!)
+                }
+                DispatchQueue.main.async {
+                    guard self.isCurrentOpenRequest(requestID) else { return }
+                    let t4 = Date()
+                    self.isLoadingBook = false
+                    self.loadingBookPath = nil
+                    self.endLoadingUI()
+                    self.apply(book: book, url: url, restoreOffset: restoreOffset)
+                    if timingEnabled {
+                        FileHandle.standardError.write(String(
+                            format: "[open-timing] 回主线程延迟 %.1fms · 主线程挂书+首屏排版 %.1fms\n",
+                            t4.timeIntervalSince(t3) * 1000,
+                            Date().timeIntervalSince(t4) * 1000).data(using: .utf8)!)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self = self, self.isCurrentOpenRequest(requestID) else { return }
+                    self.isLoadingBook = false
+                    self.loadingBookPath = nil
+                    self.endLoadingUI()
+                    // 旧书可能还在屏上：把进度回调接回去，别让它默默丢进度
+                    if self.readingView.book != nil {
+                        self.attachProgressCallback()
+                    }
+                    self.presentOpenError(error)
+                }
+            }
+        }
+    }
+
+    /// 同步打开。**只给命令行自检用**：自检需要在 open 返回后立刻断言页首偏移。
+    /// 真实用户路径一律走上面的异步 `open(url:)`。
+    func openSynchronously(url: URL, restoreOffset: Int? = nil) {
+        _ = advanceOpenRequestID()   // 让可能还在跑的异步打开结果作废
+        // 若上一个异步请求把 loading 状态留在了 true（它的结果已被作废），这里收尾
+        if isLoadingBook {
+            isLoadingBook = false
+            endLoadingUI()
+        }
         readingView.onProgressChange = nil
         do {
             let data = try Data(contentsOf: url)
             let decoded = try TextDecoder.decode(data)
-            let book = TextBook(fileURL: url, rawText: decoded.text, encodingName: decoded.encodingName)
-
-            let settings = library.settings
-            // 规则和默认值相同时不会重复解析（大书打开能省一次全量解析）
-            book.applyChapterRule(settings.chapterRule)
-            readingView.settings = settings
-            readingView.book = book
-            window.title = "\(book.displayName) — Reader"
-
-            // 加入阅读列表（MRU 置顶；已存在则保留其进度）
-            library.touch(fileName: url.path)
-            currentBookPath = url.path
-            let saved = library.mostRecent?.index ?? 0
-            let target = restoreOffset ?? saved
-            if target > 0, target < book.units.count {
-                readingView.jump(to: target)
-            }
-
-            // 现在才接上进度回调
-            readingView.onProgressChange = { [weak self] offset in
-                self?.library.updateProgress(offset: offset, at: 0)
-            }
-            library.updateProgress(offset: readingView.page.start, at: 0)
-
-            libraryWindow?.reload()
-            bookmarkWindow?.update(book: book)
-            chapterSearchWindow?.update(book: book, currentOffset: readingView.pageStart)
-            // 换书了：查找结果按旧书的偏移算的，全部作废（查询词保留）
-            findWindow?.update(book: book)
-            window.makeFirstResponder(readingView)
-
-            if settings.didFallbackFont {
-                statusLabel.stringValue = "字体「\(settings.fontName)」本机没有，已回退到 \(settings.renderFontName)"
-            }
+            let book = TextBook(fileURL: url, rawText: decoded.text,
+                                encodingName: decoded.encodingName,
+                                chapterRule: library.settings.chapterRule)
+            apply(book: book, url: url, restoreOffset: restoreOffset)
         } catch {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "打不开这个文件"
-            alert.informativeText = "\(error)"
-            alert.runModal()
+            if readingView.book != nil { attachProgressCallback() }
+            presentOpenError(error)
         }
+    }
+
+    /// 打开结果落到主线程之后：接上阅读视图 / 书架 / 辅助窗口 / 进度。
+    private func apply(book: TextBook, url: URL, restoreOffset: Int?) {
+        let settings = library.settings
+        // 打开时已按同一规则解析过，这里通常是 no-op；设置若在加载期间被改过则补一次
+        book.applyChapterRule(settings.chapterRule)
+        readingView.settings = settings
+        readingView.book = book
+        window.title = "\(book.displayName) — Reader"
+
+        // 加入阅读列表（MRU 置顶；已存在则保留其进度）
+        library.touch(fileName: url.path)
+        currentBookPath = url.path
+        // 总字数在解码后已经知道，直接回填 —— 否则书架会为了百分比把整本书再解一遍
+        library.seedLength(book.units.count, forStoredPath: url.path)
+        let saved = library.mostRecent?.index ?? 0
+        let target = restoreOffset ?? saved
+        if target > 0, target < book.units.count {
+            readingView.jump(to: target)
+        }
+
+        // 现在才接上进度回调
+        attachProgressCallback()
+        library.updateProgress(offset: readingView.page.start, at: 0)
+
+        libraryWindow?.reload()
+        bookmarkWindow?.update(book: book)
+        chapterSearchWindow?.update(book: book, currentOffset: readingView.pageStart)
+        // 换书了：查找结果按旧书的偏移算的，全部作废（查询词保留）
+        findWindow?.update(book: book)
+        window.makeFirstResponder(readingView)
+
+        if settings.didFallbackFont {
+            statusLabel.stringValue = "字体「\(settings.fontName)」本机没有，已回退到 \(settings.renderFontName)"
+        }
+    }
+
+    // MARK: - 打开中的反馈（对应原版 PlayLoadingImage / StopLoadingImage）
+
+    /// 打开成功后接上进度回调；打开失败时旧书还在屏上，也要接回去。
+    private func attachProgressCallback() {
+        readingView.onProgressChange = { [weak self] offset in
+            self?.library.updateProgress(offset: offset, at: 0)
+        }
+    }
+
+    private func beginLoadingUI(for url: URL) {
+        let name = url.deletingPathExtension().lastPathComponent
+        // 连续快速打开时只记「进入加载前」的状态；第二次不要把自己写的
+        // 「正在打开《A》…」当成要恢复的状态。
+        if statusBeforeLoading == nil {
+            statusBeforeLoading = statusLabel.stringValue
+        }
+        if titleBeforeLoading == nil {
+            titleBeforeLoading = window.title
+        }
+        window.title = "正在打开《\(name)》 — Reader"
+        statusLabel.stringValue = "正在打开《\(name)》…"
+        loadingIndicator?.isHidden = false
+        loadingIndicator?.startAnimation(nil)
+    }
+
+    private func endLoadingUI() {
+        loadingIndicator?.stopAnimation(nil)
+        loadingIndicator?.isHidden = true
+        if let old = statusBeforeLoading {
+            statusLabel.stringValue = old
+            statusBeforeLoading = nil
+        }
+        // 失败时要把标题也还原，否则旧书还在屏上、标题却是失败的那本
+        if let oldTitle = titleBeforeLoading {
+            window.title = oldTitle
+            titleBeforeLoading = nil
+        }
+    }
+
+    private func presentOpenError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "打不开这个文件"
+        alert.informativeText = "\(error)"
+        alert.runModal()
     }
 
     /// 关掉当前打开的书，回到空状态。
@@ -304,6 +491,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 书架已经空了，阅读界面还在显示那本书，而且进度再也写不进去
     /// （`updateProgress` 找不到对应的条目，静默丢弃）。
     private func closeCurrentBook() {
+        // 只有「正在加载的正是要关掉的那本」时才取消在途打开；
+        // 加载 B 期间把当前显示的 A 从书架移除，不该顺带把 B 也取消。
+        if isLoadingBook, loadingBookPath == currentBookPath {
+            _ = advanceOpenRequestID()
+            isLoadingBook = false
+            loadingBookPath = nil
+            endLoadingUI()
+        }
         readingView.onProgressChange = nil
         readingView.book = nil
         bookmarkWindow?.update(book: nil)
@@ -392,12 +587,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func enterEditMode() {
+        // 异步打开期间不允许进编辑：否则编辑器里的旧文本会和正在换的书对不上
+        guard !isLoadingBook else {
+            NSSound.beep()
+            statusLabel?.stringValue = "正在打开书，稍等再进编辑模式"
+            return
+        }
         guard let book = readingView.book else {
             NSSound.beep()
             statusLabel?.stringValue = "先打开一本书再进入编辑模式"
             return
         }
         editOriginalText = book.rawText
+        // 记住「正在编辑哪本书」——保存时必须按这个身份写，不能读 readingView.book
+        editingBook = book
 
         let scroll = NSScrollView(frame: readingView.frame)
         scroll.autoresizingMask = [.width, .height]
@@ -437,28 +640,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard let tv = editorTextView else { return }
         let newText = tv.string
         let changed = (newText != editOriginalText)
+        // 保存目标用进编辑时记下的那本书，而不是「当前」readingView.book
+        let editing = editingBook
 
+        var shouldSave = false
         if changed {
             let a = NSAlert()
             a.messageText = "保存对文本的修改？"
-            a.informativeText = "会直接写回原文件（保持原编码 \(readingView.book?.encodingName ?? "UTF-8")），此操作不可撤销。"
+            a.informativeText = "会直接写回原文件（保持原编码 \(editing?.encodingName ?? "UTF-8")），此操作不可撤销。"
             a.addButton(withTitle: "保存")
             a.addButton(withTitle: "放弃修改")
             a.addButton(withTitle: "继续编辑")
             let resp = a.runModal()
             if resp == .alertThirdButtonReturn { return }        // 继续编辑
-            if resp == .alertFirstButtonReturn { saveEditedText(newText) }
+            shouldSave = (resp == .alertFirstButtonReturn)
         }
 
+        // 先收起编辑器，再保存 + 重开 —— 否则重开的 open(url:) 会再次触发「退出编辑」
         editorTextView = nil
         editorScrollView?.removeFromSuperview()
         editorScrollView = nil
         editMenuItem?.state = .off
+        editingBook = nil
         window.makeFirstResponder(readingView)
+
+        if shouldSave, let book = editing {
+            saveEditedText(newText, book: book)
+        }
     }
 
-    private func saveEditedText(_ text: String) {
-        guard let book = readingView.book else { return }
+    private func saveEditedText(_ text: String, book: TextBook) {
         guard let data = TextDecoder.encode(text, encodingName: book.encodingName) else {
             let a = NSAlert()
             a.messageText = "保存失败"

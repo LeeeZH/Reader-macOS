@@ -22,27 +22,31 @@ struct DecodedText {
 enum TextDecoder {
 
     static func decode(_ data: Data) throws -> DecodedText {
-        let bytes = [UInt8](data)
-        guard !bytes.isEmpty else { throw TextDecoderError.empty }
+        // ⚠️ 不要先 `let bytes = [UInt8](data)`：那会把整本小说再复制一遍
+        //    （47.7MB / 约 40ms + 47MB 峰值内存）。BOM 和 UTF-8 探测只需要
+        //    开头 4096 字节，剩下的解码直接吃 Data。
+        guard !data.isEmpty else { throw TextDecoderError.empty }
+
+        let head = [UInt8](data.prefix(4))
 
         // ---- 1) BOM 检测 ----
-        if bytes.count >= 4 {
-            if bytes[0] == 0xFF, bytes[1] == 0xFE, bytes[2] == 0x00, bytes[3] == 0x00 { throw TextDecoderError.unsupportedUTF32 }
-            if bytes[0] == 0x00, bytes[1] == 0x00, bytes[2] == 0xFE, bytes[3] == 0xFF { throw TextDecoderError.unsupportedUTF32 }
+        if head.count >= 4 {
+            if head[0] == 0xFF, head[1] == 0xFE, head[2] == 0x00, head[3] == 0x00 { throw TextDecoderError.unsupportedUTF32 }
+            if head[0] == 0x00, head[1] == 0x00, head[2] == 0xFE, head[3] == 0xFF { throw TextDecoderError.unsupportedUTF32 }
         }
-        if bytes.count >= 3, bytes[0] == 0xEF, bytes[1] == 0xBB, bytes[2] == 0xBF {
-            let body = Data(bytes[3...])
+        if head.count >= 3, head[0] == 0xEF, head[1] == 0xBB, head[2] == 0xBF {
+            let body = data.dropFirst(3)
             return DecodedText(text: String(decoding: body, as: UTF8.self), encodingName: "UTF-8 (BOM)")
         }
-        if bytes.count >= 2, bytes[0] == 0xFF, bytes[1] == 0xFE {
-            return DecodedText(text: decodeUTF16(Array(bytes[2...]), littleEndian: true), encodingName: "UTF-16LE")
+        if head.count >= 2, head[0] == 0xFF, head[1] == 0xFE {
+            return DecodedText(text: decodeUTF16(Array(data.dropFirst(2)), littleEndian: true), encodingName: "UTF-16LE")
         }
-        if bytes.count >= 2, bytes[0] == 0xFE, bytes[1] == 0xFF {
-            return DecodedText(text: decodeUTF16(Array(bytes[2...]), littleEndian: false), encodingName: "UTF-16BE")
+        if head.count >= 2, head[0] == 0xFE, head[1] == 0xFF {
+            return DecodedText(text: decodeUTF16(Array(data.dropFirst(2)), littleEndian: false), encodingName: "UTF-16BE")
         }
 
         // ---- 2) 无 BOM：取前 min(size, 4096) 字节做 UTF-8 合法性校验（对应 is_utf8）----
-        let probe = Array(bytes.prefix(4096))
+        let probe = [UInt8](data.prefix(4096))
         if isValidUTF8(probe) {
             return DecodedText(text: String(decoding: data, as: UTF8.self), encodingName: "UTF-8")
         }

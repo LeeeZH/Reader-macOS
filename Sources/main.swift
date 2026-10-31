@@ -6,8 +6,9 @@ do {
     let devFlags: Set<String> = [
         "--render-page", "--render-library", "--render-settings", "--render-bookmarks",
         "--render-chapter-search", "--render-find",
-        "--dump-pages", "--library-selftest", "--dump-touchbar",
+        "--dump-pages", "--dump-chapters", "--library-selftest", "--dump-touchbar",
         "--close-selftest", "--quit-selftest", "--early-open-selftest",
+        "--open-async-selftest", "--open-bench",
         "--toc-selftest", "--chapter-search-selftest", "--find-selftest",
         "--always-on-top-selftest",
     ]
@@ -160,6 +161,31 @@ if let idx = CommandLine.arguments.firstIndex(of: "--dump-pages"),
         }
         FileHandle.standardOutput.write(out.data(using: .utf8)!)
         FileHandle.standardError.write("共 \(page + 1) 页 · 画布 \(Int(w))x\(Int(h)) · 全书 \(book.units.count) 字 · \(book.chapters.count) 章\n".data(using: .utf8)!)
+        exit(0)
+    } catch {
+        FileHandle.standardError.write("失败: \(error)\n".data(using: .utf8)!)
+        exit(1)
+    }
+}
+
+// ── 开发者工具：导出章节表（章节解析等价性 / parity 回归用）──
+// 用法: Reader --dump-chapters <book.txt>
+// 输出每章的 行首偏移、标题长度、标题。改动章节解析后和旧版逐行 diff，
+// 确认「解析结果一模一样」——章节表不写盘，这是唯一可靠的自动化比对手段。
+if let idx = CommandLine.arguments.firstIndex(of: "--dump-chapters"),
+   CommandLine.arguments.count > idx + 1 {
+    let path = CommandLine.arguments[idx + 1]
+    do {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let decoded = try TextDecoder.decode(data)
+        let book = TextBook(fileURL: URL(fileURLWithPath: path),
+                            rawText: decoded.text, encodingName: decoded.encodingName)
+        var out = "index\toffset\ttitle_len\ttitle\n"
+        out.reserveCapacity(book.chapters.count * 48)
+        for (i, ch) in book.chapters.enumerated() {
+            out += "\(i)\t\(ch.index)\t\(ch.titleLength)\t\(ch.title)\n"
+        }
+        FileHandle.standardOutput.write(out.data(using: .utf8)!)
         exit(0)
     } catch {
         FileHandle.standardError.write("失败: \(error)\n".data(using: .utf8)!)
@@ -467,7 +493,7 @@ if CommandLine.arguments.contains("--library-selftest") {
     NSApp.delegate = ad
     ad.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
     LibraryStore.shared.updateSettings { $0.autoPageIntervalMS = 1000; $0.autoPageMode = 0 }
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
+    ad.openSynchronously(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     do {
         let beforeAuto = ad.debugPageStart
         ad.toggleAutoPage(nil)
@@ -531,14 +557,14 @@ if CommandLine.arguments.contains("--library-selftest") {
             log("  \(enc) 往返: ❌ 编码失败")
         }
     }
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
+    ad.openSynchronously(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     ad.toggleEditMode(nil)
     log("  进入编辑模式: \(ad.debugEditModeActive ? "✅" : "❌")")
     ad.toggleEditMode(nil)
     log("  未改动退出: \(ad.debugEditModeActive ? "❌ 还在编辑" : "✅ 已退出（未弹保存框）")")
 
     log("--- 11) 沉浸模式（隐藏顶栏和底栏） ---")
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
+    ad.openSynchronously(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     LibraryStore.shared.updateSettings { $0.hideChrome = false }
     ad.toggleHideChrome(nil)   // 先确保是「关」，下一行再开
     if LibraryStore.shared.settings.hideChrome { ad.toggleHideChrome(nil) }
@@ -565,7 +591,7 @@ if CommandLine.arguments.contains("--library-selftest") {
     // 关键回归：透明时窗口阴影必须关掉。isOpaque=false 的窗口，macOS 按 alpha
     // 蒙版算阴影；背景透明后只剩文字不透明 → 阴影变成「文字轮廓」，
     // 看起来就是每个字后面拖着一层虚影（用户形容为「视网膜残留」）。
-    ad.open(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
+    ad.openSynchronously(url: URL(fileURLWithPath: cwd + "/samples/古文观止.txt"))
     LibraryStore.shared.updateSettings { $0.alpha = 255 }
     ad.toggleHideChrome(nil); ad.toggleHideChrome(nil)     // 触发一次 applyWindowChrome
     log("  alpha=255: 窗口不透明=\(ad.debugWindowOpaque)  有阴影=\(ad.debugWindowHasShadow)")
@@ -712,7 +738,7 @@ if CommandLine.arguments.contains("--toc-selftest") {
         check(false, "能取到「跳转到章节…」菜单项")
     }
 
-    delegate.open(url: bookURL)
+    delegate.openSynchronously(url: bookURL)
     log("打开测试书: \(bookURL.lastPathComponent)（\(chapterCount) 章）")
 
     let topLevel = delegate.debugTopLevelMenuTitles.filter { !$0.isEmpty }
@@ -869,7 +895,7 @@ if CommandLine.arguments.contains("--chapter-search-selftest") {
     }
 
     delegate.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-    delegate.open(url: bookURL)
+    delegate.openSynchronously(url: bookURL)
     log("打开测试书: \(bookURL.lastPathComponent)（\(chapterCount) 章）")
 
     guard let data = try? Data(contentsOf: bookURL),
@@ -1019,7 +1045,7 @@ if CommandLine.arguments.contains("--find-selftest") {
         check(false, "能找到「查找…」菜单项")
     }
 
-    delegate.open(url: bookURL)
+    delegate.openSynchronously(url: bookURL)
     guard let data = try? Data(contentsOf: bookURL),
           let decoded = try? TextDecoder.decode(data) else {
         log("❌ 重新解析测试书失败")
@@ -1234,6 +1260,94 @@ if earlyOpenSelftest {
             exit(8)
         }
     }
+}
+
+// ── 开发者工具：异步打开自检 ──
+// 用法： Reader --open-async-selftest
+// 保证「打开大文件时主线程不被解码/解析卡住」这条优化不回退：
+//   1. open 立即返回  2. 加载中显示转圈  3. 后台完成后书才上屏
+//   4. 连续快速打开 A→B，只有 B 生效（旧请求结果被丢弃）
+if CommandLine.arguments.contains("--open-async-selftest") {
+    var failures = 0
+    func log(_ msg: String) {
+        FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    }
+    func check(_ cond: Bool, _ name: String, _ detail: String = "") {
+        log(cond ? "  ✅ \(name)" : "  ❌ \(name)\(detail.isEmpty ? "" : "（\(detail)）")")
+        if !cond { failures += 1 }
+    }
+
+    let ad = AppDelegate()
+    NSApp.delegate = ad
+    ad.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+
+    let cwd = FileManager.default.currentDirectoryPath
+    let bookA = cwd + "/samples/古文观止.txt"
+    let bookB = cwd + "/samples/古文观止-GBK.txt"
+
+    log("--- 1) open 立即返回 ---")
+    let t0 = Date()
+    ad.open(url: URL(fileURLWithPath: bookA))
+    let retMS = Date().timeIntervalSince(t0) * 1000
+    check(retMS < 50, "open 调用立即返回（不等解码/解析）", String(format: "%.1fms", retMS))
+    check(ad.debugIsOpeningBook, "加载中标记为 true")
+    check(ad.debugIsLoadingIndicatorVisible, "加载中显示转圈指示器")
+
+    log("--- 2) 后台完成后书才上屏 ---")
+    let deadline = Date().addingTimeInterval(5)
+    while ad.debugIsOpeningBook, Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    }
+    check(!ad.debugIsOpeningBook, "加载完成（5 秒内）")
+    check(!ad.debugIsLoadingIndicatorVisible, "加载完成后转圈停止")
+    check(ad.debugCurrentBookPath == bookA, "当前书是刚打开的那本", ad.debugCurrentBookPath ?? "nil")
+    check(ad.debugBookLen > 0, "正文已上屏", "units=\(ad.debugBookLen)")
+
+    log("--- 3) 连续快速打开 A→B，只有 B 生效 ---")
+    ad.open(url: URL(fileURLWithPath: bookA))
+    ad.open(url: URL(fileURLWithPath: bookB))
+    let deadline2 = Date().addingTimeInterval(5)
+    while ad.debugIsOpeningBook, Date() < deadline2 {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+    }
+    check(!ad.debugIsOpeningBook, "第二轮加载完成")
+    check(ad.debugCurrentBookPath == bookB,
+          "最后打开的 B 生效（A 的过期结果被丢弃）", ad.debugCurrentBookPath ?? "nil")
+
+    log(failures == 0 ? "✅ 异步打开自检全部通过" : "❌ 异步打开自检失败 \(failures) 项")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// ── 开发者工具：异步打开耗时基准 ──
+// 用法： Reader --open-bench <book.txt>
+// 输出 open 调用返回耗时、书真正上屏耗时（两次计时之间主线程只跑 RunLoop）。
+// 注意：applicationDidFinishLaunching 会先把命令行里的书自动打开一次（warmup），
+// 所以这里量的是**第二次**打开 —— 页缓存已热。冷读首开看 READER_OPEN_TIMING 第一组。
+// 要量「用户真实首开」：直接 `READER_OPEN_TIMING=1 Reader <book>`，看第一组数字。
+if let idx = CommandLine.arguments.firstIndex(of: "--open-bench"),
+   CommandLine.arguments.count > idx + 1 {
+    let ad = AppDelegate()
+    NSApp.delegate = ad
+    ad.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+    // ⚠️ applicationDidFinishLaunching 会把命令行里第一个非 `-` 参数当成书直接打开。
+    // 先把它等完，否则下面这次 open 会排在串行队列后面，测成「两次打开叠加」。
+    let warmup = Date().addingTimeInterval(120)
+    while ad.debugIsOpeningBook, Date() < warmup {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    let path = CommandLine.arguments[idx + 1]
+    let t0 = Date()
+    ad.open(url: URL(fileURLWithPath: path))
+    let retMS = Date().timeIntervalSince(t0) * 1000
+    let deadline = Date().addingTimeInterval(120)
+    while ad.debugIsOpeningBook, Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    let totalMS = Date().timeIntervalSince(t0) * 1000
+    FileHandle.standardError.write(String(
+        format: "open 返回 %.1f ms · 书真正上屏 %.1f ms（第二次打开·页缓存已热）· 总字数 %d · 章节 %d\n",
+        retMS, totalMS, ad.debugBookLen, ad.debugChapterCount).data(using: .utf8)!)
+    exit(ad.debugBookLen > 0 ? 0 : 1)
 }
 
 app.run()

@@ -36,7 +36,45 @@ enum ChapterParser {
         return s
     }()
 
-    @inline(__always) private static func u(_ s: String) -> UInt16 { Array(s.utf16)[0] }
+    // 章节识别用到的字符常量。
+    //
+    // ⚠️ 不要再写成 `u("第")` 这种 `Array(s.utf16)[0]` helper：它每调用一次就分配
+    //    一个小数组。曾经它出现在 parseDefault 的**逐字符内层循环**里，16M 码元的
+    //    长篇要做几千万次堆分配（release -O 也不会折叠），47.7MB 小说光打开就多花
+    //    2 秒以上（实测 2.2s）。这里改成字面量常量，循环里只剩整数比较。
+    private static let cDi: UInt16 = 0x7B2C        // 第
+    private static let cColonFull: UInt16 = 0xFF1A // ：
+    private static let cColonHalf: UInt16 = 0x003A // :
+    private static let cJuan: UInt16 = 0x5377      // 卷
+    private static let cZhang: UInt16 = 0x7AE0     // 章
+    private static let cBu: UInt16 = 0x90E8        // 部
+    private static let cJie: UInt16 = 0x8282       // 节
+    private static let cXie: UInt16 = 0x6954       // 楔
+    private static let cZi: UInt16 = 0x5B50        // 子
+    private static let cXu: UInt16 = 0x5E8F        // 序
+
+    /// 「这一行可能出章节标题」的字符查询表（UInt16 → Bool，64KB）。
+    ///
+    /// 正文行绝大多数不含任何章节候选字，逐字符走完整判断是纯浪费；
+    /// 先用一次查表把「不可能出章节」的行整行跳过（一次查表比 7 个 `==` 快）。
+    private static let chapterCandidateTable: [Bool] = {
+        var t = [Bool](repeating: false, count: 0x10000)
+        for c in [0x7B2C, 0x5377, 0x7AE0, 0x90E8, 0x8282, 0x6954, 0x5E8F] {
+            t[c] = true
+        }
+        return t
+    }()
+
+    /// 行内是否含任意一个可能触发章节匹配的字符。
+    @inline(__always)
+    private static func lineHasChapterCandidate(_ text: [UInt16], _ start: Int, _ len: Int) -> Bool {
+        var i = 0
+        while i < len {
+            if chapterCandidateTable[Int(text[start + i])] { return true }
+            i += 1
+        }
+        return false
+    }
 
     /// 对应 TextBook::IsChapter（白名单校验）
     static func isChapter(_ text: [UInt16], _ start: Int, _ len: Int) -> Bool {
@@ -67,13 +105,20 @@ enum ChapterParser {
         while pos < n, let li = TextNormalizer.getLine(text, pos, n - pos) {
             let lineSize = li.lineLength
 
+            // 快筛：不含「第/卷/章/部/节/楔/序」的行不可能解析出章节，
+            // 整行跳过（小说里 98% 以上的正文行都走这条捷径）。
+            if !lineHasChapterCandidate(text, pos, lineSize) {
+                pos += lineSize + 1
+                continue
+            }
+
             var idx1 = -1, idx2 = -1
             var found = false
 
             var i = 0
             while i < lineSize {
                 let c = text[pos + i]
-                if c == u("第") { idx1 = i }
+                if c == cDi { idx1 = i }
 
                 // ⚠️ 原版此处的 && / || 优先级有瑕疵：两个冒号分支绕过了 idx1 > -1 的前提。
                 //    这里**刻意照搬**，以保证与原版解析结果一致。
@@ -84,10 +129,10 @@ enum ChapterParser {
                              || next == 0x3000
                              || next == 0x00A0
                              || lineSize <= i + 1)
-                let hit = (idx1 > -1 && condB) || next == u("：") || next == u(":")
+                let hit = (idx1 > -1 && condB) || next == cColonFull || next == cColonHalf
 
                 if hit {
-                    if c == u("卷") || c == u("章") || c == u("部") || c == u("节") {
+                    if c == cJuan || c == cZhang || c == cBu || c == cJie {
                         idx2 = i
                         found = true
                         break
@@ -105,10 +150,10 @@ enum ChapterParser {
                     let n2: UInt16 = (i + 2 < lineSize) ? text[pos + i + 2] : 0
                     let atEnd = (i + 2 >= lineSize)
                     let followedByBlank = atEnd || n2 == 0x20 || n2 == 0x09 || n2 == 0x3000
-                    if followedByBlank, c == u("楔"), text[pos + i + 1] == u("子") {
+                    if followedByBlank, c == cXie, text[pos + i + 1] == cZi {
                         idx1 = i; idx2 = lineSize - 1; found = true; break
                     }
-                    if followedByBlank, c == u("序"), text[pos + i + 1] == u("章") {
+                    if followedByBlank, c == cXu, text[pos + i + 1] == cZhang {
                         idx1 = i; idx2 = lineSize - 1; found = true; break
                     }
                 }
@@ -116,7 +161,7 @@ enum ChapterParser {
             }
 
             if found, idx1 >= 0 {
-                let isSpecial = text[pos + idx1] == u("楔") || text[pos + idx1] == u("序")
+                let isSpecial = text[pos + idx1] == cXie || text[pos + idx1] == cXu
                 if isSpecial || isChapter(text, pos + idx1 + 1, idx2 - idx1 - 1) {
                     let titleLen = min(lineSize - idx1, ReaderDefaults.maxChapterLength - 1)
                     titleBuf = Array(text[(pos + idx1)..<(pos + idx1 + titleLen)])

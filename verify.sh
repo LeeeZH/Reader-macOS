@@ -65,6 +65,16 @@ if [ "$OPEN_CODE" -ne 0 ] || [ "$AFTER_CRASH" -gt "$BEFORE_CRASH" ]; then
 fi
 grep -E "✅" "$OUT/earlyopen.log" | sed 's/^/  /'
 
+step "4.65/5 异步打开自检（open 立即返回 / 加载中转圈 / 后台完成才上屏 / 连开只认最后一本）"
+set +e
+"$BIN" --open-async-selftest >"$OUT/open-async.log" 2>&1
+ASYNC_CODE=$?
+set -e
+grep -E "✅|❌" "$OUT/open-async.log" | sed 's/^/  /'
+if [ "$ASYNC_CODE" -ne 0 ]; then
+    echo "  ❌ 异步打开自检失败（退出码 $ASYNC_CODE）"; cat "$OUT/open-async.log"; exit 1
+fi
+
 step "4.7/5 目录菜单自检（一级菜单 + 3000 章全部列出 + 当前章定位 + 跳转）"
 set +e
 "$BIN" --toc-selftest >"$OUT/toc.log" 2>&1
@@ -103,6 +113,16 @@ set -e
 grep -E "✅|❌|level =" "$OUT/top.log" | sed 's/^/  /'
 if [ "$TOP_CODE" -ne 0 ]; then
     echo "  ❌ 窗口置顶自检失败（退出码 $TOP_CODE）"; cat "$OUT/top.log"; exit 1
+fi
+
+step "4.11/5 章节解析 golden 比对（--dump-chapters 必须与基准逐字节一致）"
+"$BIN" --dump-chapters "$ROOT/samples/古文观止.txt" >"$OUT/chapters.tsv" 2>/dev/null
+if diff -q "$ROOT/samples/golden-chapters.tsv" "$OUT/chapters.tsv" >/dev/null; then
+    echo "  ✅ 章节表与基准一致（3 章：偏移 / 标题长度 / 标题）"
+else
+    echo "  ❌ 章节表与基准不一致："
+    diff "$ROOT/samples/golden-chapters.tsv" "$OUT/chapters.tsv" | head -20
+    exit 1
 fi
 
 step "5/5 离屏渲染"

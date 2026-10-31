@@ -462,6 +462,57 @@ floating 窗口，所以主窗口浮起来之后，设置窗口会被自家主�
   **显式**写 `hidesOnDeactivate = false`：NSWindow 默认就是 false，但 NSPanel 默认是
   true —— 将来真要改 NSPanel，不至于变成「一点别的应用窗口就消失」。
 
+### 10. 打开一本书：全量工作放后台，章节解析别逐字符分配
+
+打开 txt 的实际工作是**整本**：读文件 → 解码 → `FormatText` 规范化 → 解析章节。
+这些一步都不能省（进度/书签是规范化后的 UTF-16 偏移，章节表不落盘），
+所以只能决定「在哪个线程做」和「做多少遍」。
+
+2026-10 实测（47.7MB / 16,317,047 码元 / 6,849 章的《史上最强炼气期》，release -O）：
+
+| 版本 | 打开管线 CPU | 用户感知 |
+|---|---|---|
+| 优化前 | **2.55s**（全在主线程） | 窗口已显示但白屏卡死 2.5 秒，随后才出字 |
+| 优化后（`--render-page` 计时） | **0.32s** | — |
+| 优化后（真实异步路径 `--open-bench`） | `open` 调用返回 **0.1~0.6ms**；书真正上屏 **约 240ms** | 立即出转圈，约 1/4 秒后可读 |
+
+三处改动，按收益排序：
+
+1. **章节解析去堆分配（收益最大，约 2.2s）**。`parseDefault` 的逐字符内层循环里
+   原来用 `u("第")`，实现是 `Array(s.utf16)[0]` —— 每字符 2~3 次小数组分配，
+   16M 码元就是几千万次。release -O 也不会折叠（反汇编里循环体内仍是成串的
+   `swift_allocObject` + `_copySequenceContents`）。修复：字符改字面量常量，
+   再加 64KB 查表 `chapterCandidateTable`，把「不含第/卷/章/部/节/楔/序」的行
+   整行跳过（小说里 98% 以上是普通正文行）。**改完章节表和改前逐字节一致**。
+2. **解码去掉整本 `[UInt8](data)` 复制**。BOM 和 UTF-8 探测只需要开头 4096 字节，
+   UTF-8 解码直接吃 `Data`；UTF-16 分支才 `Array(data.dropFirst(2))`。
+3. **打开流水线整体移到后台**，主线程只做「挂书 + 首屏排版」（实测 1~2ms；
+   AppKit 的视图更新必须在主线程，别再往下挪）。对应原版 `Book::OpenBook` 起
+   worker 线程 + `PlayLoadingImage` 的做法：打开中显示转圈 + 状态栏「正在打开…」，
+   窗口保持可交互。
+
+配套细节：
+
+- **旧请求作废**：`openRequestID` 递增，后台结果回主线程时对不上序号就丢弃
+  （原版用 `ForceKill` 杀旧线程，这里更安全）。连开 A→B 只认 B。
+- **打开中关书 / 从书架移除**：`closeCurrentBook()` 也会递增序号，避免异步结果
+  把已经关掉的书又挂回来。
+- **只解析一次章节**：`TextBook.init(chapterRule:)` 直接用当前设置规则解析；
+  之前是「默认规则一遍 + 设置规则一遍」，非默认规则用户会白付一次全量解析。
+- **回填字数**：`open` 成功后把 `book.units.count` 写进 `LibraryStore.lengthCache`
+  （`seedLength`）。否则书架为了显示百分比，会把刚打开的整本书再 decode+format
+  一遍 —— 那是原版没有的、本移植版自己引入的重复工作。
+- **回归工具**：`--open-async-selftest`（verify.sh 4.65 步，钉住「open 立即返回 /
+  转圈 / 后台完成才上屏 / 连开只认最后一本」）、`--open-bench <book>`（量真实
+  异步打开耗时）、`READER_OPEN_TIMING=1`（把 read/decode/format+parse/主线程挂书
+  各阶段耗时打到 stderr）、`--dump-chapters <book>`（导出章节表；改解析逻辑后
+  和旧版逐行 diff，章节表不落盘，这是唯一可靠的等价性验证手段）。
+  verify.sh 4.11 步用 `samples/golden-chapters.tsv` 对样书做 golden 比对，
+  防止解析逻辑以后被改坏。
+
+> 内存峰值没变（约 220MB）：解码后的 `Data`、UTF-16 临时数组、规范化输出在
+> 打开期间必然同时存在；省的是 CPU 和「主线程被占住」的体感。
+
 ---
 
 ## 数据存放位置
@@ -562,6 +613,7 @@ READER_CACHE_PATH=/任意/位置/cache.dat ./run.sh
 | 设置界面底部被截断 | 窗口高度写死；改为按 `grid.fittingSize` 自适应 |
 | 拖字距 / 行距 / 段距滑块时正文变了，设置里的数字不变 | `addSliderRow` 创建的数值标签是**局部变量**：`spacingChanged` 只把值写进设置并重排阅读界面，没有任何人再去更新那几个 `NSTextField`。修复：用 `sliderValueLabels` 登记滑块和标签，拖动时统一刷新；`syncFromSettings` 里也刷一次（否则重开设置窗口显示的还是初始值） |
 | 设置窗口里每一项改起来都很卡，长篇小说尤其明显 | 设置里的滑块是 `isContinuous`，每拖一下都会走 `applySettingsToReader()`，而它**无条件**执行 `book.chapterRule = s.chapterRule` —— `chapterRule` 的 `didSet` 会把全书章节重新解析一遍。6.4M 个 UTF-16 码元实测约 **1.3 秒/次**，所以拖字号、行距全在等解析。修复：`ChapterRule` 改为 `Equatable`，`TextBook.applyChapterRule()` 只在规则真的变化时才重解析；打开书时也跳过与默认值相同的重复解析 |
+| 打开 47.7MB 小说要白屏卡 2.5 秒（用户反馈） | 两处叠加：① 解码/规范化/章节解析全在主线程同步跑；② `parseDefault` 逐字符调 `u("第")` = `Array(s.utf16)[0]`，每字符 2~3 次堆分配，16M 码元约几千万次，单这一项就占 2.2 秒。修复：字符改字面量常量 + 候选行查表快筛（章节表逐字节不变），再把整条打开流水线放后台并显示转圈。详见「打开一本书」一节 |
 
 ---
 

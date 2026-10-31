@@ -43,13 +43,17 @@ final class TextBook {
         }
     }
 
-    init(fileURL: URL, rawText: String, encodingName: String) {
+    /// - Parameter chapterRule: 打开时就用这套规则解析章节。
+    ///   避免「先按默认规则全量解析一遍、再按用户设置解析一遍」的双倍开销
+    ///   （长篇小说一次全量解析就是几百毫秒）。
+    init(fileURL: URL, rawText: String, encodingName: String, chapterRule: ChapterRule = ChapterRule()) {
         self.fileURL = fileURL
         self.rawText = rawText
         self.encodingName = encodingName
         // 对应 Book::DecodeText 末尾必定调用的 FormatText
         self.units = TextNormalizer.format(Array(rawText.utf16))
-        self.chapters = ChapterParser.parse(self.units, rule: ChapterRule())
+        self.chapters = ChapterParser.parse(self.units, rule: chapterRule)
+        self.chapterRule = chapterRule
         self.chapterParseGeneration = 1
     }
 
