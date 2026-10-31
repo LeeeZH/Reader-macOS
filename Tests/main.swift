@@ -1898,6 +1898,147 @@ eq(sparseFontTitle?.field("lfFaceName")?.stringValue, "Songti SC",
 check((sparseFontTitle?.field("lfWeight")?.intValue ?? 0) != 0,
       "退回默认 LOGFONT 时保留其它字段（lfWeight 非 0）")
 
+// ============ 27. 背景图片（M4） ============
+print("\n[27] 背景图片")
+
+// 27.1 字段 round-trip（enable / mode / file_name，原版 bg_image 结构）
+var bgHeader = CacheSchema.defaultHeader()
+let bgDefault = ReaderSettings(header: bgHeader)
+check(!bgDefault.bgImageEnabled, "背景图默认关闭")
+eq(bgDefault.bgImageMode, 0, "默认模式 = 0（拉伸，原版 Stretch）")
+eq(bgDefault.bgImageFileName, "", "默认没有图片文件")
+check(!bgDefault.hasUsableBackgroundImage, "默认不可用（没启用）")
+
+var bgSettings = ReaderSettings()
+bgSettings.bgImageEnabled = true
+bgSettings.bgImageMode = 2
+bgSettings.bgImageFileName = "/tmp/bg.png"
+bgSettings.apply(to: &bgHeader)
+eq(bgHeader["bg_image"]?.field("enable")?.intValue, 1, "enable 写回 1")
+eq(bgHeader["bg_image"]?.field("mode")?.intValue, 2, "mode 写回 2（平铺翻转）")
+eq(bgHeader["bg_image"]?.field("file_name")?.stringValue, "/tmp/bg.png", "file_name 写回")
+let bgReloaded = ReaderSettings(header: bgHeader)
+check(bgReloaded.bgImageEnabled, "enable 读回")
+eq(bgReloaded.bgImageMode, 2, "mode 读回")
+eq(bgReloaded.bgImageFileName, "/tmp/bg.png", "file_name 读回")
+
+// 27.2 bg_image 里将来可能新增的子字段不能被静默丢掉
+var bgExtraHeader = CacheSchema.defaultHeader()
+if case .object(var bgObj) = bgExtraHeader["bg_image"] ?? .null {
+    bgObj.append(("future_key", .string("keep-me")))
+    bgExtraHeader["bg_image"] = .object(bgObj)
+}
+bgSettings.apply(to: &bgExtraHeader)
+eq(bgExtraHeader["bg_image"]?.field("future_key")?.stringValue, "keep-me",
+   "bg_image 的未知子字段被保留")
+
+// 27.3 三种铺法（对应原版 DisplaySet.cpp 的 Stretch / Tile / TileFlip）
+let bgArea = CGRect(x: 0, y: 0, width: 200, height: 100)
+let bgImageSize = CGSize(width: 48, height: 48)
+
+let stretchTiles = BackgroundImageLayout.tiles(for: .stretch, imageSize: bgImageSize, in: bgArea)
+eq(stretchTiles.count, 1, "拉伸模式只有一片")
+eq(stretchTiles[0].rect, bgArea, "拉伸模式铺满整个区域")
+check(!stretchTiles[0].flipH && !stretchTiles[0].flipV, "拉伸模式不镜像")
+
+let tileTiles = BackgroundImageLayout.tiles(for: .tile, imageSize: bgImageSize, in: bgArea)
+// 48×48 铺 200×100：ceil(200/48)=5 列、ceil(100/48)=3 行 → 15 片（边缘会超出，绘制时裁掉）
+eq(tileTiles.count, 15, "48×48 平铺 200×100 = 5 列 × 3 行 = 15 片")
+check(tileTiles.allSatisfy { $0.rect.size == bgImageSize }, "平铺模式保持图片原尺寸")
+check(tileTiles.allSatisfy { !$0.flipH && !$0.flipV }, "平铺模式不镜像")
+check((tileTiles.map { $0.rect.maxX }.max() ?? 0) >= bgArea.maxX,
+      "瓦片横向盖满整个区域")
+check((tileTiles.map { $0.rect.maxY }.max() ?? 0) >= bgArea.maxY,
+      "瓦片纵向盖满整个区域")
+
+let flipTiles = BackgroundImageLayout.tiles(for: .tileFlip, imageSize: bgImageSize, in: bgArea)
+eq(flipTiles.count, 15, "平铺翻转的片数与平铺相同")
+check(!flipTiles[0].flipH && !flipTiles[0].flipV, "★ (0,0) 不镜像")
+check(flipTiles[1].flipH && !flipTiles[1].flipV, "★ (1,0) 只水平镜像")
+check(!flipTiles[5].flipH && flipTiles[5].flipV, "★ (0,1) 只垂直镜像")
+check(flipTiles[6].flipH && flipTiles[6].flipV, "★ (1,1) 水平 + 垂直都镜像")
+eq(BackgroundImageMode.stretch.title, "拉伸铺满", "模式 0 = 拉伸铺满")
+eq(BackgroundImageMode.tile.title, "平铺", "模式 1 = 平铺")
+eq(BackgroundImageMode.tileFlip.title, "平铺翻转", "模式 2 = 平铺翻转")
+
+// 27.4 非法尺寸不出瓦片（调用方回落纯色）
+check(BackgroundImageLayout.tiles(for: .tile, imageSize: .zero,
+                                  in: bgArea).isEmpty, "图片尺寸为 0 时不出瓦片")
+check(BackgroundImageLayout.tiles(for: .stretch, imageSize: bgImageSize,
+                                  in: .zero).isEmpty, "绘制区域为 0 时不出瓦片")
+
+// 27.5 极小图片不能把片数撑爆（1×1 铺 1000×800 = 80 万片会卡死主线程）
+let tinyTiles = BackgroundImageLayout.tiles(for: .tile, imageSize: CGSize(width: 1, height: 1),
+                                            in: CGRect(x: 0, y: 0, width: 1000, height: 800))
+check(tinyTiles.count <= BackgroundImageLayout.maxTiles,
+      "★ 1×1 图片平铺时片数被压在上限内", "\(tinyTiles.count) 片")
+check((tinyTiles.map { $0.rect.maxX }.max() ?? 0) >= 1000
+      && (tinyTiles.map { $0.rect.maxY }.max() ?? 0) >= 800,
+      "压片数之后仍然铺满整个区域")
+
+// 27.6 ReadingView：能加载图片、文件缺失回落纯色、不影响分页
+let bgURL = tmp.appendingPathComponent("bg-test.png")
+let bgRep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 8,
+                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bgRep)
+NSColor.red.setFill()
+NSRect(x: 0, y: 0, width: 8, height: 8).fill()
+NSGraphicsContext.restoreGraphicsState()
+try bgRep.representation(using: .png, properties: [:])!.write(to: bgURL)
+
+let bgView = ReadingView(frame: NSRect(x: 0, y: 0, width: 420, height: 660))
+bgView.book = navBook
+let bgPageEndBefore = bgView.page.end
+bgView.settings.bgImageEnabled = true
+bgView.settings.bgImageFileName = bgURL.path
+check(bgView.debugHasBackgroundImage, "★ 启用后背景图读进内存")
+eq(bgView.page.end, bgPageEndBefore, "背景图不影响分页")
+bgView.settings.bgImageMode = 1
+check(bgView.debugBackgroundTileCount > 1, "★ 平铺模式在当前窗口里有多片",
+      "\(bgView.debugBackgroundTileCount) 片")
+bgView.settings.bgImageFileName = "/tmp/reader-no-such-bg.png"
+check(!bgView.debugHasBackgroundImage, "★ 文件缺失时不加载（回落纯色，不崩）")
+check(bgView.backgroundImageMissing, "文件缺失时置 missing 标记（设置页提示用）")
+bgView.settings.bgImageEnabled = false
+check(!bgView.backgroundImageMissing, "关掉背景图后清掉 missing 标记")
+
+// 27.7 设置界面：默认置灰；选了不存在的文件要有提示；写进 store
+let bgStore = LibraryStore(fileURL: tmp.appendingPathComponent("bg-settings.dat"))
+bgStore.load()
+let bgWC = SettingsWindowController(store: bgStore) { }
+check(bgWC.debugBgImageHintHidden, "没选文件时不显示「找不到文件」提示")
+let bgOffControls = bgWC.debugBgImageControlsEnabled
+check(!bgOffControls.mode && !bgOffControls.choose,
+      "★ 没启用背景图时模式 / 选择置灰")
+bgWC.debugSetBackgroundImage(path: "/tmp/reader-no-such-bg.png", mode: 2)
+check(bgStore.settings.bgImageEnabled, "★ 启用写进设置")
+eq(bgStore.settings.bgImageMode, 2, "模式写进设置")
+eq(bgStore.settings.bgImageFileName, "/tmp/reader-no-such-bg.png", "路径写进设置")
+check(!bgWC.debugBgImageHintHidden, "★ 文件不存在时设置页给出提示（不弹窗）")
+let bgOnControls = bgWC.debugBgImageControlsEnabled
+check(bgOnControls.mode && bgOnControls.choose, "启用后模式 / 选择可点")
+
+// 27.8 半透明窗口：背景图必须跟着淡（文字仍然不透明）
+//
+// 回归：曾经只用 `ctx.setAlpha` 调淡背景，但 `NSImage.draw` 走 AppKit 绘制路径，
+// 不吃 CGContext 的全局 alpha —— 图整块不透明地盖上去，半透明窗口在有背景图时
+// 看起来跟完全不透明一样。现在显式给 `fraction:` 传 alpha。
+let fadeView = ReadingView(frame: NSRect(x: 0, y: 0, width: 120, height: 80))
+fadeView.settings.bgImageEnabled = true
+fadeView.settings.bgImageFileName = bgURL.path
+fadeView.settings.bgImageMode = 0
+fadeView.settings.alpha = 128
+if let fadeRep = fadeView.bitmapImageRepForCachingDisplay(in: fadeView.bounds) {
+    fadeView.cacheDisplay(in: fadeView.bounds, to: fadeRep)
+    let alphaValue = fadeRep.colorAt(x: 60, y: 40)?.alphaComponent ?? 1
+    check(alphaValue < 0.95, "★ 半透明窗口下背景图跟着淡（不被不透明地盖住）",
+          "alpha=\(alphaValue)")
+} else {
+    check(false, "半透明窗口背景图渲染（无法创建位图）")
+}
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

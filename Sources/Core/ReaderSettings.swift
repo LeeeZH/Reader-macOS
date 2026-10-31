@@ -22,6 +22,13 @@ struct ReaderSettings {
     var titleFontName: String = ReaderDefaults.fontName
     var titlePointSize: CGFloat = ReaderDefaults.fontSize
 
+    /// 背景图片（原版 `header.bg_image`，三个字段：enable / mode / file_name）。
+    /// `mode` 语义照原版 `DisplaySet.cpp`：0 = 拉伸、1 = 平铺、2 = 平铺翻转。
+    /// 直接读写原版结构，不新增自定义键。
+    var bgImageEnabled: Bool = false
+    var bgImageMode: Int = 0
+    var bgImageFileName: String = ""
+
     var charGap: Int = 0
     var lineGap: Int = 5
     var paragraphGap: Int = 15
@@ -143,6 +150,12 @@ struct ReaderSettings {
         lineGap = i("line_gap")
         paragraphGap = i("paragraph_gap")
         leftLineCount = i("left_line_count")
+        // 背景图片：缺这个对象时保持字段初值（关闭 / 拉伸 / 空路径）
+        if let bi = header["bg_image"] {
+            bgImageEnabled = (bi.field("enable")?.intValue ?? 0) != 0
+            bgImageMode = bi.field("mode")?.intValue ?? 0
+            bgImageFileName = bi.field("file_name")?.stringValue ?? ""
+        }
         if let r = header["internal_border"], let o = r.objectValue {
             var m: [String: Int] = [:]
             for (k, v) in o { m[k] = v.intValue ?? 0 }
@@ -260,6 +273,20 @@ struct ReaderSettings {
             ("right", .int(insetRight)), ("bottom", .int(insetBottom)),
         ]))
 
+        // 背景图片：保留对象里可能存在的其它子字段（和 font 一样，不静默丢）
+        var bgImage = header["bg_image"]?.objectValue ?? []
+        func putBgImage(_ key: String, _ value: JSONValue) {
+            if let i = bgImage.firstIndex(where: { $0.0 == key }) {
+                bgImage[i].1 = value
+            } else {
+                bgImage.append((key, value))
+            }
+        }
+        putBgImage("enable", .int(bgImageEnabled ? 1 : 0))
+        putBgImage("mode", .int(bgImageMode))
+        putBgImage("file_name", .string(bgImageFileName))
+        set("bg_image", .object(bgImage))
+
         set("word_wrap", .int(wordWrap ? 1 : 0))
         set("line_indent", .int(lineIndent ? 1 : 0))
         set("blank_lines", .int(compressBlankLines ? 1 : 0))
@@ -326,6 +353,13 @@ struct ReaderSettings {
     var renderTitleFontName: String { FontResolver.resolve(titleFontName) }
     /// 是否发生了字体回退（UI 可据此提示用户）
     var didFallbackFont: Bool { FontResolver.needsFallback(fontName) }
+
+    /// 背景图在当前配置下能不能真的画出来（已启用 + 选了文件 + 文件还在）。
+    /// 文件不存在时各处一律回落纯色 —— 不弹窗、不崩（设置页负责提示）。
+    var hasUsableBackgroundImage: Bool {
+        guard bgImageEnabled, !bgImageFileName.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: bgImageFileName)
+    }
 }
 
 extension CGColor {

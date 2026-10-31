@@ -70,6 +70,17 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-page"),
             view.settings.titleFontName = name
             view.settings.titlePointSize = size
         }
+        // --bg-image <路径> [--bg-mode <0|1|2>]：预览背景图（0 拉伸 / 1 平铺 / 2 平铺翻转）
+        if let bi = CommandLine.arguments.firstIndex(of: "--bg-image"),
+           CommandLine.arguments.count > bi + 1 {
+            view.settings.bgImageEnabled = true
+            view.settings.bgImageFileName = CommandLine.arguments[bi + 1]
+            if let mi = CommandLine.arguments.firstIndex(of: "--bg-mode"),
+               CommandLine.arguments.count > mi + 1,
+               let m = Int(CommandLine.arguments[mi + 1]), (0...2).contains(m) {
+                view.settings.bgImageMode = m
+            }
+        }
         for _ in 0..<pages { view.goNextPage() }
         // 可选：--find <查询词> 把命中高亮画出来并跳到第一处（检查高亮效果用）
         if let fi = CommandLine.arguments.firstIndex(of: "--find"),

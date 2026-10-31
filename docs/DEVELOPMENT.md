@@ -73,6 +73,8 @@ $B --render-page 书.txt /tmp/mid.png 0 220       # 第 5 个参数 = 平滑滚�
                                                   # （用来检查下一页有没有严丝合缝接上）
 $B --render-page 书.txt /tmp/title.png 0 --title-font "Songti SC" --title-size 26
                                                   # 章节标题独立字体预览（= 关掉「同字体」）
+$B --render-page 书.txt /tmp/bg.png 0 --bg-image samples/bg-tile.png --bg-mode 2
+                                                  # 背景图片预览：0 拉伸 / 1 平铺 / 2 平铺翻转
 ```
 
 **导出分页表（parity / 回归用）**：
@@ -163,10 +165,10 @@ $B --always-on-top-selftest
 **一键验证**（**打包 / 发版前**跑一遍）：
 
 ```bash
-./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 窗口置顶自检 → 章节/分页 golden 比对 → 离屏渲染
+./verify.sh     # 构建 → 单测 → 启动冒烟 → 窗口自检 → 关窗自检 → 启动前打开自检 → 目录菜单自检 → 章节搜索自检 → 全文搜索自检 → 窗口置顶自检 → 章节/分页 golden 比对 → 背景图渲染 → 离屏渲染
 ```
 
-> ⏱️ **不要每改一行就全量跑。** `verify.sh` 要构建 + 起 7 个自检进程 + 渲染 8 张图，
+> ⏱️ **不要每改一行就全量跑。** `verify.sh` 要构建 + 起 7 个自检进程 + 渲染十几张图，
 > 单次几十秒到一分多钟；日常迭代只跑被改到的那一小块：
 >
 > - 只动核心逻辑（解码 / 章节 / 设置 / 搜索）→ `./test.sh`
@@ -233,6 +235,7 @@ $B --always-on-top-selftest
 - [x] **书签面板** `⌘B`：列出当前书的书签（章节名 + 位置），可跳转 / 删除 / 全部清除
 - [x] **窗口透明**：背景可调不透明度（10%~100%），**文字始终不透明**（比原版连字一起透明更易读）
 - [x] **章节标题独立字体 / 颜色**（原版 `use_same_font` / `font_title` / `font_color_title`）：关掉「与正文同字体」后标题段落用自己的字体、字号、颜色（含折行续行）；默认同字体同色，分页基准不变。设置 → 显示 → 章节标题
+- [x] **背景图片**（原版 `bg_image.enable / mode / file_name`）：拉伸铺满 / 平铺 / 平铺翻转（镜像棋盘）；纯色打底、图在上、正文最后，窗口半透明时图跟着淡而文字始终不透明；铺好的整层缓存成位图（滚动不掉帧，片数上限 2000）；文件缺失回落纯色 + 设置页标红提示。设置 → 显示 → 背景图片
 - [x] **窗口置顶**：`NSWindow.level = .floating` + 失焦不隐藏（`macos_always_on_top`），浮在其它应用的普通 / 最大化窗口之上；**不进**别人的原生全屏 Space（见设计决策 9）。开关联动：菜单「视图 → 窗口置顶」（`⌃⌘T`）、菜单栏图标菜单、设置 → 窗口
 - [x] **全局热键** `⌃⌥H`：一键隐藏 / 显示窗口（对应原版 Alt+H 的「老板键」）
 - [x] **菜单栏图标**：显示/隐藏、打开文件、阅读列表、自动翻页、窗口置顶、沉浸阅读、设置、退出
@@ -264,7 +267,6 @@ $B --always-on-top-selftest
 
 尚未实现（进度与顺序看 [路线图](ROADMAP.md)，这里只列结论）：
 
-- [ ] 背景图片（拉伸/平铺/平铺翻转）
 - [ ] 在线书源（需要先改「完全离线」的产品承诺）、EPUB（需要先做书籍抽象 + 零依赖 ZIP，MOBI 放弃）
 
 ---
@@ -282,6 +284,7 @@ Reader/
 ├── samples/古文观止.txt           样书（3 章，UTF-8）
 ├── samples/古文观止-GBK.txt       同一本样书的 GBK 编码版
 ├── samples/golden-pages.tsv  分页基准快照（parity 回归用）
+├── samples/bg-tile.png       背景图渲染夹具（48×48，检查平铺原点 / 镜像方向）
 ├── docs/DEVELOPMENT.md       开发笔记（本文件）
 ├── docs/ROADMAP.md           路线图：接下来做什么 / 明确不做什么
 ├── docs/images/               README 用的界面截图
@@ -630,6 +633,7 @@ READER_CACHE_PATH=/任意/位置/cache.dat ./run.sh
 | 打开 47.7MB 小说要白屏卡 2.5 秒（用户反馈） | 两处叠加：① 解码/规范化/章节解析全在主线程同步跑；② `parseDefault` 逐字符调 `u("第")` = `Array(s.utf16)[0]`，每字符 2~3 次堆分配，16M 码元约几千万次，单这一项就占 2.2 秒。修复：字符改字面量常量 + 候选行查表快筛（章节表逐字节不变），再把整条打开流水线放后台并显示转圈。详见「打开一本书」一节 |
 | 长标题换页时，标题行突然掉回正文字体（M3 自测没抓到，code review 抓到） | 第一版把「当前段落是不是标题」写成 `var paragraphIsTitle = false`，只在**段落开头**重新判断。但原版 `is_title = IsChapter(start)`（Page.cpp:737）里的 `Book::IsChapter` 是**区间判定** `idx ∈ [ch.index, ch.index + title_len)`（Book.cpp:260-268），所以一页从长标题中间开始时（翻页 / 翻页重叠行 / 跳转到标题内偏移 / 平滑滚动的下一页），原版续行仍是标题。修复：初值改成 `book.isChapterTitle(at: 页首偏移)`。回归测试见 `[26] 26.8`（造一个跨页长标题，断言第 2 页续行样式仍是 `.title`） |
 | 存档里缺 `font_title` 时，存一次盘就把 Windows 版的字体写成空 LOGFONT | `apply` 里写的是 `if case .object(var lf) = header["font_title"] ?? .object([])`：`??` 的兜底是个**空对象**，所以缺键时它照样匹配、循环一遍什么都不改，最后把 `{}` 写进 header。`CacheCodec.decode` 不补齐缺键（只有写盘时 `normalizedHeader` 按顺序补），于是 Windows 版读到 `lfHeight` / `lfFaceName` 全为 0 的字体 → 字体没了。修复：`writeFont()` 在缺键 / 空对象时退回 `CacheSchema.defaultHeader()` 里的默认 LOGFONT，正文和标题共用这一条路径 |
+| 窗口调半透明后，有背景图时整窗看起来完全不透明 | 背景用 `ctx.setAlpha` 调淡，但 `NSImage.draw` 走 AppKit 绘制路径，**不吃 CGContext 的全局 alpha**；图按自己的状态整块不透明地盖上去，把下面淡过的纯色底也盖实了。修复：淡出显式给 `layer.draw(…, fraction: alpha)` 传值，同时把 ctx 全局 alpha 复位（否则成了 alpha²）。回归测试见 `[27] 27.8`（渲染到位图后取像素 alpha 断言 < 0.95） |
 
 ---
 

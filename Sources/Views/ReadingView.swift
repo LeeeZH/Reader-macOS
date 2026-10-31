@@ -14,6 +14,7 @@ final class ReadingView: NSView {
     var settings = ReaderSettings() {
         didSet {
             rebuildMetrics()
+            reloadBackgroundImage()
             relayout()
         }
     }
@@ -59,6 +60,90 @@ final class ReadingView: NSView {
     private func metrics(for style: LineStyle) -> TextMetrics {
         guard style == .title, let t = titleMetrics else { return metrics }
         return t
+    }
+
+    // MARK: - 背景图片
+
+    /// 已经读进内存的背景图；文件缺失 / 未启用时为 nil（回落纯色）。
+    private var backgroundImage: NSImage?
+    /// 上次尝试加载的路径（含失败）—— 路径没变就不重复读盘
+    private var backgroundImagePath = ""
+    /// 上次加载是否因为文件缺失失败（设置页 / 自检提示用）
+    private(set) var backgroundImageMissing = false
+    /// 「按当前模式铺好的背景」缓存：平滑滚动每帧都重绘，平铺模式下逐片 draw
+    /// 上千次会掉帧。原版也是先合成到窗口大小的位图再贴（DisplaySet.cpp `_load_bg_image`）。
+    private var backgroundLayer: NSImage?
+    private var backgroundLayerKey = ""
+
+    private func reloadBackgroundImage() {
+        let path = settings.bgImageEnabled ? settings.bgImageFileName : ""
+        guard path != backgroundImagePath else { return }
+        backgroundImagePath = path
+        backgroundLayer = nil
+        backgroundLayerKey = ""
+        if path.isEmpty {
+            backgroundImage = nil
+            backgroundImageMissing = false
+            return
+        }
+        backgroundImage = NSImage(contentsOfFile: path)
+        backgroundImageMissing = (backgroundImage == nil)
+    }
+
+    /// 当前视图尺寸下，按模式铺好的整张背景（没有图 / 铺不下就返回 nil）。
+    private func currentBackgroundLayer() -> NSImage? {
+        guard let image = backgroundImage else { return nil }
+        let scale = window?.backingScaleFactor ?? 2
+        let key = "\(backgroundImagePath)|\(settings.bgImageMode)|" +
+                  "\(Int(bounds.width))x\(Int(bounds.height))|\(Int(scale * 100))"
+        if key == backgroundLayerKey, let layer = backgroundLayer { return layer }
+
+        let size = bounds.size
+        let pw = Int((size.width * scale).rounded())
+        let ph = Int((size.height * scale).rounded())
+        guard pw > 0, ph > 0,
+              let ctx = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8,
+                                  bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.interpolationQuality = .high
+        let mode = BackgroundImageMode(rawValue: settings.bgImageMode) ?? .stretch
+        let tiles = BackgroundImageLayout.tiles(for: mode, imageSize: image.size,
+                                                in: CGRect(origin: .zero, size: size))
+        guard !tiles.isEmpty else { return nil }
+
+        let nsContext = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = nsContext
+        for tile in tiles {
+            ctx.saveGState()
+            if tile.flipH || tile.flipV {
+                // 绕瓦片中心镜像（GDI+ WrapModeTileFlipXY 的镜像棋盘）
+                let c = CGPoint(x: tile.rect.midX, y: tile.rect.midY)
+                ctx.translateBy(x: c.x, y: c.y)
+                ctx.scaleBy(x: tile.flipH ? -1 : 1, y: tile.flipV ? -1 : 1)
+                ctx.translateBy(x: -c.x, y: -c.y)
+            }
+            image.draw(in: tile.rect, from: .zero, operation: .sourceOver, fraction: 1)
+            ctx.restoreGState()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+
+        let layer = ctx.makeImage().map { NSImage(cgImage: $0, size: size) }
+        backgroundLayer = layer
+        backgroundLayerKey = key
+        return layer
+    }
+
+    /// 自检用：背景图是否已经读进内存（文件缺失时为 false → 回落纯色）
+    var debugHasBackgroundImage: Bool { backgroundImage != nil }
+    /// 自检用：按当前模式铺出来的瓦片数（首次调用会合成并缓存整张背景）
+    var debugBackgroundTileCount: Int {
+        guard let image = backgroundImage else { return 0 }
+        let mode = BackgroundImageMode(rawValue: settings.bgImageMode) ?? .stretch
+        return BackgroundImageLayout.tiles(for: mode, imageSize: image.size, in: bounds).count
     }
 
     // MARK: 全文搜索高亮状态
@@ -574,17 +659,7 @@ final class ReadingView: NSView {
         // 原版用 UpdateLayeredWindow 是把整个窗口连字一起调透明，字会发虚；
         // 这里只降背景，可读性好得多。
         let bgAlpha = CGFloat(min(255, max(0, settings.alpha))) / 255.0
-        if bgAlpha < 1.0 {
-            ctx.clear(bounds)
-            ctx.saveGState()
-            ctx.setAlpha(bgAlpha)
-            ctx.setFillColor(settings.renderBackgroundColor(dark: dark))
-            ctx.fill(bounds)
-            ctx.restoreGState()
-        } else {
-            ctx.setFillColor(settings.renderBackgroundColor(dark: dark))
-            ctx.fill(bounds)
-        }
+        drawBackground(dark: dark, alpha: bgAlpha, ctx: ctx)
         guard let book = book else { return }
         ctx.setAlpha(1.0)      // 文字永远按不透明画
 
@@ -606,6 +681,27 @@ final class ReadingView: NSView {
             drawLines(nextPage.lines, units: units, top: &top, dark: dark, ctx: ctx)
         }
 
+        ctx.restoreGState()
+    }
+
+    /// 背景 = 纯色底 → 背景图（对应原版 `_load_bg_image` 的绘制顺序）。
+    /// 窗口半透明时两层一起淡，**文字永远不透明**。
+    ///
+    /// ⚠️ 背景图不能用 `ctx.setAlpha` 去淡：`NSImage.draw` 走 AppKit 的绘制路径，
+    /// 会按自己的状态合成，实测全局 alpha 对它不生效（图整块不透明地盖上去，
+    /// 于是半透明窗口在有背景图时看起来跟不透明一样）。淡出要显式传 `fraction`，
+    /// 同时把全局 alpha 复位，否则就成了 alpha²。
+    private func drawBackground(dark: Bool, alpha: CGFloat, ctx: CGContext) {
+        ctx.saveGState()
+        if alpha < 1.0 { ctx.clear(bounds) }
+        ctx.setAlpha(alpha)
+        ctx.setFillColor(settings.renderBackgroundColor(dark: dark))
+        ctx.fill(bounds)
+        if let layer = currentBackgroundLayer() {
+            ctx.setAlpha(1.0)
+            ctx.clip(to: bounds)
+            layer.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: alpha)
+        }
         ctx.restoreGState()
     }
 

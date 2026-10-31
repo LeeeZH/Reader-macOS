@@ -138,6 +138,23 @@ else
     exit 1
 fi
 
+step "4.13/5 背景图片（拉伸 / 平铺 / 平铺翻转 / 文件缺失回落纯色）"
+BG="$ROOT/samples/bg-tile.png"
+for mode in 0 1 2; do
+    "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-bg-$mode.png" 0 \
+        --bg-image "$BG" --bg-mode "$mode" >/dev/null 2>&1
+done
+# 文件缺失时必须回落纯色、正常出图（不弹窗、不崩）
+set +e
+"$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-bg-missing.png" 0 \
+    --bg-image "$OUT/definitely-no-such-image.png" >/dev/null 2>&1
+BG_CODE=$?
+set -e
+if [ "$BG_CODE" -ne 0 ]; then
+    echo "  ❌ 背景图文件缺失时渲染失败（退出码 $BG_CODE）"; exit 1
+fi
+echo "  ✅ 三种铺法出图正常；文件缺失回落纯色且不崩"
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1

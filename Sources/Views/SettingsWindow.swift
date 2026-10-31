@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// 显示设置窗口。
 ///
@@ -22,6 +23,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var textColorWell: NSColorWell!
     private var bgColorWell: NSColorWell!
     private var followSystemCheck: NSButton!
+    private var bgImageCheck: NSButton!
+    private var bgImageModePopup: NSPopUpButton!
+    private var bgImagePathLabel: NSTextField!
+    private var bgImageChooseButton: NSButton!
+    private var bgImageClearButton: NSButton!
+    private var bgImageHint: NSTextField!
+    /// 「找不到文件」那一行；没有问题时整行收起（隐藏控件不收起行会留一条空白）
+    private var bgImageHintRow: NSGridRow?
     private var alphaSlider: NSSlider!
     private var alphaLabel: NSTextField!
     private var menuBarCheck: NSButton!
@@ -94,6 +103,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     func debugSetTitleSameFont(_ same: Bool) {
         titleSameFontCheck.state = same ? .on : .off
         titleSameFontChanged()
+    }
+
+    /// 自检用：背景图那组的可编辑状态（没勾「使用背景图片」时都该置灰）
+    var debugBgImageControlsEnabled: (mode: Bool, choose: Bool) {
+        (bgImageModePopup?.isEnabled ?? false, bgImageChooseButton?.isEnabled ?? false)
+    }
+    /// 自检用：「找不到文件」提示是否显示
+    var debugBgImageHintHidden: Bool { bgImageHint?.isHidden ?? true }
+    /// 自检用：模拟选好一张背景图（走和真实选择同一条刷新路径）
+    func debugSetBackgroundImage(path: String, mode: Int) {
+        bgImageCheck.state = .on
+        bgImageModePopup.selectItem(at: min(max(0, mode), BackgroundImageMode.allCases.count - 1))
+        apply {
+            $0.bgImageEnabled = true
+            $0.bgImageFileName = path
+            $0.bgImageMode = mode
+        }
+        syncFromSettings()
     }
 
     /// 自动翻页是运行时状态（不在存档里），由外部提供
@@ -254,6 +281,33 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private func buildDisplayTab() -> (NSScrollView, NSSize) {
         let grid = makeGrid()
 
+        // ── 章节标题（原版 use_same_font / font_title / font_color_title）──
+        // 默认勾上：与正文同字体同色，渲染结果和加这个功能之前完全一样。
+        // 取消勾选后下面三行才生效 —— 和原版 DisplaySet.cpp 一样在同字体模式下置灰，
+        // 而不是留着控件让人点了没反应。
+        section(grid, "章节标题")
+        titleSameFontCheck = NSButton(checkboxWithTitle: "章节标题与正文用同一字体和颜色",
+                                      target: self, action: #selector(titleSameFontChanged))
+        grid.addRow(with: [NSGridCell.emptyContentView, titleSameFontCheck])
+
+        titleFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        titleFontPopup.target = self
+        titleFontPopup.action = #selector(titleFontChanged)
+        populateFonts(for: titleFontPopup, current: store.settings.titleFontName)
+        grid.addRow(with: [label("标题字体"), titleFontPopup])
+
+        titleSizeSlider = NSSlider(value: 14, minValue: 8, maxValue: 72,
+                                   target: self, action: #selector(titleSizeChanged))
+        titleSizeSlider.isContinuous = true
+        titleSizeLabel = NSTextField(labelWithString: "14 pt")
+        titleSizeLabel.textColor = .secondaryLabelColor
+        grid.addRow(with: [label("标题字号"), titleSizeSlider, titleSizeLabel])
+
+        titleColorWell = NSColorWell(frame: .zero)
+        titleColorWell.target = self
+        titleColorWell.action = #selector(titleColorChanged)
+        grid.addRow(with: [label("标题颜色"), titleColorWell])
+
         section(grid, "字体")
         fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         fontPopup.target = self
@@ -282,32 +336,42 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                      target: self, action: #selector(followSystemChanged))
         grid.addRow(with: [NSGridCell.emptyContentView, followSystemCheck])
 
-        // ── 章节标题（原版 use_same_font / font_title / font_color_title）──
-        // 默认勾上：与正文同字体同色，渲染结果和加这个功能之前完全一样。
-        // 取消勾选后下面三行才生效 —— 和原版 DisplaySet.cpp 一样在同字体模式下置灰，
-        // 而不是留着控件让人点了没反应。
-        section(grid, "章节标题")
-        titleSameFontCheck = NSButton(checkboxWithTitle: "章节标题与正文用同一字体和颜色",
-                                      target: self, action: #selector(titleSameFontChanged))
-        grid.addRow(with: [NSGridCell.emptyContentView, titleSameFontCheck])
+        // ── 背景图片（原版 bg_image.enable / mode / file_name）──
+        section(grid, "背景图片")
+        bgImageCheck = NSButton(checkboxWithTitle: "使用背景图片（纯色打底）",
+                                target: self, action: #selector(bgImageToggled))
+        grid.addRow(with: [NSGridCell.emptyContentView, bgImageCheck])
 
-        titleFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        titleFontPopup.target = self
-        titleFontPopup.action = #selector(titleFontChanged)
-        populateFonts(for: titleFontPopup, current: store.settings.titleFontName)
-        grid.addRow(with: [label("标题字体"), titleFontPopup])
+        bgImageModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for mode in BackgroundImageMode.allCases {
+            bgImageModePopup.addItem(withTitle: mode.title)
+        }
+        bgImageModePopup.target = self
+        bgImageModePopup.action = #selector(bgImageModeChanged)
+        grid.addRow(with: [label("图片模式"), bgImageModePopup])
 
-        titleSizeSlider = NSSlider(value: 14, minValue: 8, maxValue: 72,
-                                   target: self, action: #selector(titleSizeChanged))
-        titleSizeSlider.isContinuous = true
-        titleSizeLabel = NSTextField(labelWithString: "14 pt")
-        titleSizeLabel.textColor = .secondaryLabelColor
-        grid.addRow(with: [label("标题字号"), titleSizeSlider, titleSizeLabel])
+        bgImagePathLabel = NSTextField(labelWithString: "（未选择）")
+        bgImagePathLabel.textColor = .secondaryLabelColor
+        bgImagePathLabel.lineBreakMode = .byTruncatingMiddle
+        bgImagePathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bgImagePathLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 210).isActive = true
+        bgImageChooseButton = NSButton(title: "选择…", target: self, action: #selector(bgImageBrowse))
+        bgImageChooseButton.bezelStyle = .rounded
+        bgImageClearButton = NSButton(title: "清除", target: self, action: #selector(bgImageClear))
+        bgImageClearButton.bezelStyle = .rounded
+        let bgFileRow = NSStackView()
+        bgFileRow.orientation = .horizontal
+        bgFileRow.spacing = 6
+        bgFileRow.addArrangedSubview(bgImagePathLabel)
+        bgFileRow.addArrangedSubview(bgImageChooseButton)
+        bgFileRow.addArrangedSubview(bgImageClearButton)
+        grid.addRow(with: [label("图片文件"), bgFileRow])
 
-        titleColorWell = NSColorWell(frame: .zero)
-        titleColorWell.target = self
-        titleColorWell.action = #selector(titleColorChanged)
-        grid.addRow(with: [label("标题颜色"), titleColorWell])
+        bgImageHint = NSTextField(labelWithString: "找不到这个文件，已回退纯色背景")
+        bgImageHint.font = NSFont.systemFont(ofSize: 11)
+        bgImageHint.textColor = .systemRed
+        bgImageHintRow = grid.addRow(with: [NSGridCell.emptyContentView, bgImageHint])
+        bgImageHintRow?.isHidden = true
 
         section(grid, "排版")
         charGapSlider = addSliderRow(grid, "字距", 0, 10, 0, #selector(spacingChanged))
@@ -542,6 +606,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         titleSizeLabel.textColor = on ? .secondaryLabelColor : .tertiaryLabelColor
     }
 
+    /// 没勾「使用背景图片」时，模式 / 文件 / 清除都不生效 —— 置灰。
+    private func updateBgImageControlsEnabled() {
+        let on = bgImageCheck.state == .on
+        bgImageModePopup.isEnabled = on
+        bgImageChooseButton.isEnabled = on
+        bgImageClearButton.isEnabled = on
+        bgImagePathLabel.textColor = on ? .secondaryLabelColor : .tertiaryLabelColor
+    }
+
     // MARK: - 同步
 
     func syncFromSettings() {
@@ -568,6 +641,20 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             bgColorWell.color = NSColor(cgColor: s.backgroundColor) ?? .white
         }
         followSystemCheck.state = s.followSystemAppearance ? .on : .off
+
+        // ── 背景图片 ──
+        bgImageCheck.state = s.bgImageEnabled ? .on : .off
+        bgImageModePopup.selectItem(at: min(max(0, s.bgImageMode),
+                                           BackgroundImageMode.allCases.count - 1))
+        let bgName = s.bgImageFileName
+        bgImagePathLabel.stringValue = bgName.isEmpty
+            ? "（未选择）"
+            : (bgName as NSString).lastPathComponent
+        bgImagePathLabel.toolTip = bgName.isEmpty ? nil : bgName
+        // 文件被删 / 路径不对：静默回落纯色，但设置页要说清楚（不弹窗）
+        bgImageHintRow?.isHidden = !(s.bgImageEnabled && !bgName.isEmpty
+                                     && !FileManager.default.fileExists(atPath: bgName))
+        updateBgImageControlsEnabled()
 
         // ── 章节标题 ──
         titleSameFontCheck.state = s.useSameFont ? .on : .off
@@ -740,6 +827,37 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         syncFromSettings()
     }
 
+    // MARK: - 背景图片
+
+    @objc private func bgImageToggled() {
+        apply { $0.bgImageEnabled = bgImageCheck.state == .on }
+        updateBgImageControlsEnabled()
+    }
+
+    @objc private func bgImageModeChanged() {
+        apply { $0.bgImageMode = bgImageModePopup.indexOfSelectedItem }
+    }
+
+    @objc private func bgImageBrowse() {
+        let panel = NSOpenPanel()
+        panel.title = "选择背景图片"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .gif, .bmp, .heic, .webP]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        apply {
+            $0.bgImageEnabled = true
+            $0.bgImageFileName = url.path
+        }
+        syncFromSettings()
+    }
+
+    @objc private func bgImageClear() {
+        apply { $0.bgImageFileName = "" }
+        syncFromSettings()
+    }
+
     private func makeMousePopup(_ actions: [ReaderSettings.MouseAction],
                                 _ titles: [String], _ action: Selector) -> NSPopUpButton {
         let p = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -885,6 +1003,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             s.titleColorRef = fresh.titleColorRef
             s.textColorRef = fresh.textColorRef
             s.backgroundColorRef = fresh.backgroundColorRef
+            s.bgImageEnabled = fresh.bgImageEnabled
+            s.bgImageMode = fresh.bgImageMode
+            s.bgImageFileName = fresh.bgImageFileName
             s.followSystemAppearance = fresh.followSystemAppearance
             s.alpha = fresh.alpha
             s.menuBarIcon = fresh.menuBarIcon
