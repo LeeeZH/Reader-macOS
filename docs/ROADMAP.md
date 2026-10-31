@@ -28,7 +28,7 @@
 | M3 | 章节标题独立字体 / 颜色 | ✅ 已完成 | 中 |
 | M4 | 背景图片（拉伸 / 平铺 / 平铺翻转） | ✅ 已完成 | 小 |
 | M5 | 快捷键自定义（设置 → 快捷键） | ✅ 已完成 | 中 |
-| M6 | 0.2.0 发版 | ✅ 已完成 | 小 |
+| M6 | 0.2.0 / 0.2.1 发版 | ✅ 已完成 | 小 |
 | M7 | EPUB | 💤 押后 | 大 |
 | M8 | 在线书源 | 🚫 暂不做（需产品决策） | 大 |
 | — | Intel / 公证 / 自动更新 | — | 见「明确不做」 |
@@ -226,29 +226,41 @@ Mac 版不能反而更差。
 
 ---
 
-## M6 0.2.0 发版
+## M6 0.2.0 / 0.2.1 发版
 
-M1–M5 一起出包。步骤严格照 [开发笔记「发版」](DEVELOPMENT.md#发版release)：
+M1–M5 一起出包；0.2.1 是 0.2.0 之后补的修复版（只补设置 → 快捷键里的冲突 / 还原问题，
+功能与 0.2.0 相同）。步骤严格照 [开发笔记「发版」](DEVELOPMENT.md#发版release)：
 
-**当前状态（2026-10-31）**：已上传至GitHub。
+**当前状态（2026-10-31）**：两个版本都已发布到 GitHub Release。
 
-- `dist/Reader-0.2.0-macos-arm64.zip`（703 KB）
-- `dist/SHA256SUMS.txt`：`1df9a8ced4e346eb174430e7c3fa47e0c35c0d9dbec75a9a7e5dcd87368d31b5`
-- 已做：版本号 0.2.0 / build 3、`./verify.sh` 全绿、ditto 打包、
-  解压后 `codesign --verify --deep --strict` 通过、包内版本与架构（arm64）核对、
-  用包内二进制渲染 + 快捷键自检冒烟
-- 待做：打 `v0.2.0` tag 推送 → Release 上传 zip + SHA256SUMS → 用 README 永久链接
-  下载回来核对 SHA256
+| 版本 | 包 | 大小 | SHA256 |
+|---|---|---|---|
+| 0.2.0 | `Reader-0.2.0-macos-arm64.zip` | 720246 B | `1df9a8ced4e346eb174430e7c3fa47e0c35c0d9dbec75a9a7e5dcd87368d31b5` |
+| 0.2.1 | `Reader-0.2.1-macos-arm64.zip` | 744748 B | `50bc731e0b35370daf42cc71c36f7190858b26256411d8a3f6c45200cdd33925` |
 
-1. `Resources/Info.plist`：`0.1.1 → 0.2.0`、`CFBundleVersion 2 → 3`
-   （README 里的下载链接、文末版本号、Release 说明同步）。
+- 0.2.0：tag `v0.2.0` → `8bb234f`；`./verify.sh` 全绿、ditto 打包、解压后
+  `codesign --verify --deep --strict` 通过、包内版本 / 架构（arm64）核对、
+  包内二进制渲染 + 快捷键自检冒烟；Release 附件 digest 与 `SHA256SUMS.txt` 一致。
+- 0.2.1：补 `9cdcdcd`（冲突提示移到设置窗口底部固定条 / 单行「还原」也查冲突 /
+  已保存重复键位扫描 / 关窗取消录制监听 + 开发工具安静模式），版本号 0.2.1 / build 4；
+  全量 `./verify.sh` 全绿、ditto 打包、解压验签、包内渲染 + 快捷键自检冒烟。
+- **0.2.0 之后为什么马上出 0.2.1**：0.2.0 的包是 `8bb234f` 打的，之后才发现设置 → 快捷键
+  的三个回归（冲突提示在滚动区底部看不见、单行「还原」能造出两个同键、连续交换后
+  「还原」按钮状态不对），已下载 0.2.0 的人拿到的还是旧行为。**发版前先确认
+  「打包用的提交 = HEAD」**，别再让发版提交之后又冒出用户可见的修复。
+
+流程（以后照此，版本号从 `Info.plist` 读）：
+
+1. `Resources/Info.plist`：`CFBundleShortVersionString` +1、`CFBundleVersion` +1
+   （README 里的下载链接、文末版本号同步）。
 2. `./verify.sh` 全绿。
 3. `ditto -c -k --sequesterRsrc --keepParent`（**不能用 `zip -r`**，会丢扩展属性、
    签名失效）；`shasum -a 256`；解压后 `codesign --verify --deep --strict`。
-4. 打 `v0.2.0` tag 推送 → 网页上传 zip + SHA256SUMS → 用 README 里的永久链接
+4. 打 `v<版本>` tag 推送 → 上传 zip + `SHA256SUMS.txt` → 用 README 里的永久链接
    下载回来核对 SHA256。
 
-Release 说明里必须写清楚三件事：
+Release 说明里必须写清楚三件事（0.2.0 起）：
+
 - `⌘F` 现在是查找，全屏改成了 `⌃⌘F`（老用户会按错一次）；
 - 添加书签从 `⌘M` 改成 `⌘D`（`⌘M` 还给「最小化」），而且所有菜单快捷键现在都能在
   **设置 → 快捷键**里自己改；

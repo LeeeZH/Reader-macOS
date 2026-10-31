@@ -862,8 +862,8 @@ macOS 镜像与本地环境不一致，两次都挂在构建阶段，于是撤�
 `Resources/Info.plist`：
 
 ```xml
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>0.2.1</string>
+<key>CFBundleVersion</key><string>4</string>
 ```
 
 下面所有命令里的版本号都**从 plist 读**，不要手抄。
@@ -926,10 +926,11 @@ shasum -a 256 /tmp/dl.zip     # 必须与 dist/SHA256SUMS.txt 一致
 
 | 事项 | 说明 |
 |---|---|
+| **打包用的提交** | 打包前确认 `HEAD` 就是要发的提交。0.2.0 的包是发版提交打的，之后又修了快捷键设置窗口的三个回归，只能再出 0.2.1；以后版本号提交后不要再攒用户可见的修改 |
 | 资产命名 | 保持 `Reader-<版本>-macos-arm64.zip`，README 的 `releases/latest/download/...` 才不用改 |
 | 未公证 | `build.sh` 只做 ad-hoc 签名。别人首次打开必须「右键 → 打开」，或 `xattr -dr com.apple.quarantine /Applications/Reader.app` |
 | 仅 arm64 | Intel Mac 跑不了，README 与 Release 说明都要写明 |
-| 体积 | Release 单文件上限 2 GiB；当前安装包 562 KB，完全不是问题 |
+| 体积 | Release 单文件上限 2 GiB；当前安装包 727 KB，完全不是问题 |
 
 ### Release 说明模板
 

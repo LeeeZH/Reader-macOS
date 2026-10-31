@@ -43,7 +43,7 @@ Reader 是一个为 macOS 写的本地阅读器。打开一个 txt，它自动�
 
 ### 直接下载（推荐）
 
-[**↓ 下载 Reader 0.2.0**](https://github.com/LeeeZH/Reader-macOS/releases/latest/download/Reader-0.2.0-macos-arm64.zip)
+[**↓ 下载 Reader 0.2.1**](https://github.com/LeeeZH/Reader-macOS/releases/latest/download/Reader-0.2.1-macos-arm64.zip)
 
 1. 解压 zip，得到 `Reader.app`
 2. 把它拖进「应用程序」文件夹
@@ -345,6 +345,6 @@ MOBI 不考虑。计划与「明确不做」的清单见 [路线图](https://git
 
 ---
 
-**Reader 0.2.0** · macOS 13+ · Apple 芯片（arm64）
+**Reader 0.2.1** · macOS 13+ · Apple 芯片（arm64）
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
