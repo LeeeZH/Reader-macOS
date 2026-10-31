@@ -8,6 +8,16 @@ struct CharBox {
     var cluster: Int        // 码元簇长度（1，或代理对为 2）
 }
 
+/// 这一行该用哪套字体度量。
+///
+/// 对应原版 `Page::SelectFont(hdc, index, is_title)` 选出来的 `dc_idx`：
+/// `use_same_font == 1` 时原版把所有行都归到 dc 0（正文），
+/// 只有 `use_same_font == 0` 且本行属于章节标题段落时才用 dc 1。
+enum LineStyle {
+    case body
+    case title
+}
+
 /// 对应原版 Page.h 的 line_info_t
 struct LineBox {
     var start: Int          // 逻辑起点（绝对字符偏移）
@@ -16,6 +26,8 @@ struct LineBox {
     var indent: CGFloat     // 行首缩进偏移
     var height: CGFloat
     var gap: CGFloat        // 本行之后的间距：LINE_GAP / PART_GAP / 0(空行)
+    /// 本行的字体/颜色归属。标题行用标题度量时行高也会跟着变。
+    var style: LineStyle = .body
 }
 
 /// 对应原版 Page.h 的 page_info_t

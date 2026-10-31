@@ -1706,6 +1706,198 @@ eq(topWindow.level, .floating, "★ 置顶时用 floating level（高于别人�
 check(topWindow.level.rawValue > NSWindow.Level.normal.rawValue, "floating 的数值高于 normal")
 check(!topWindow.hidesOnDeactivate, "主窗口失焦不隐藏（NSPanel 默认会隐藏，不能误用）")
 
+// ============ 26. 章节标题独立字体 / 颜色（M3） ============
+print("\n[26] 章节标题独立字体 / 颜色")
+
+// 26.1 默认值：没配过标题字体的存档读出来仍然是「同字体同色」
+var titleHeader = CacheSchema.defaultHeader()
+let titleDefault = ReaderSettings(header: titleHeader)
+check(titleDefault.useSameFont, "默认 use_same_font=1（标题与正文同字体）")
+eq(titleDefault.titleFontName, titleDefault.fontName, "默认标题字体名 = 正文字体名")
+check(abs(titleDefault.titlePointSize - titleDefault.fontPointSize) < 0.01,
+      "默认标题字号 = 正文字号", "\(titleDefault.titlePointSize) vs \(titleDefault.fontPointSize)")
+
+// 26.2 字段 round-trip（use_same_font / font_title 的 LOGFONT）
+var titleSettings = ReaderSettings()
+titleSettings.useSameFont = false
+titleSettings.titleFontName = "Songti SC"
+titleSettings.titlePointSize = 22
+titleSettings.titleColorRef = 0x0000FF          // COLORREF(BGR)：红
+titleSettings.apply(to: &titleHeader)
+eq(titleHeader["use_same_font"]?.intValue, 0, "use_same_font 写回 0")
+eq(titleHeader["font_title"]?.field("lfFaceName")?.stringValue, "Songti SC",
+   "font_title.lfFaceName 写回")
+// 22pt → 96/72 像素高：-Int((22 × 96 / 72).rounded()) = -29
+eq(titleHeader["font_title"]?.field("lfHeight")?.intValue, -29,
+   "font_title.lfHeight 按点值换算成 96 DPI 像素")
+// 只改 lfHeight / lfFaceName，LOGFONT 其它字段（粗细、字符集…）必须原样保留
+eq(titleHeader["font_title"]?.field("lfWeight")?.intValue, 300,
+   "写回标题字体时不破坏 LOGFONT 其它字段（lfWeight）")
+let titleReloaded = ReaderSettings(header: titleHeader)
+check(!titleReloaded.useSameFont, "use_same_font 读回")
+eq(titleReloaded.titleFontName, "Songti SC", "标题字体名读回")
+// LOGFONT 的 lfHeight 是**整数像素**，一档 = 0.75pt，所以 22pt 存回来是 21.75pt。
+// 正文那边也是同一套换算（-19px ↔ 14.25pt），这里按量化步长给容差。
+check(abs(titleReloaded.titlePointSize - 22) < 0.75,
+      "标题字号读回（整数像素 LOGFONT，允许 0.75pt 量化误差）", "\(titleReloaded.titlePointSize)")
+eq(titleReloaded.titleColorRef, UInt32(0x0000FF), "标题颜色读回")
+
+// 26.3 颜色语义：use_same_font=1 时连标题颜色都不看（原版 Page::SelectFont）
+var sameColor = ReaderSettings()
+sameColor.useSameFont = true
+sameColor.followSystemAppearance = false
+sameColor.textColorRef = 0x000000        // 黑
+sameColor.titleColorRef = 0x0000FF      // 红
+eq(sameColor.renderTitleColor(dark: false).colorRef, UInt32(0x000000),
+   "★ 同字体模式下标题颜色跟随正文（font_color_title 不生效）")
+sameColor.useSameFont = false
+eq(sameColor.renderTitleColor(dark: false).colorRef, UInt32(0x0000FF),
+   "★ 关掉同字体后标题用 font_color_title")
+
+// 26.4 排版：默认分页不变；关掉同字体后标题行换度量、行高变大
+var titleLines: [String] = []
+for c in 1...3 {
+    titleLines.append("第\(c)章 标题\(c)")
+    titleLines.append("")
+    for _ in 0..<6 {
+        titleLines.append("    " + String(repeating: "天地玄黄宇宙洪荒日月盈昃辰宿列张", count: 2))
+        titleLines.append("")
+    }
+}
+let titleText = titleLines.joined(separator: "\n")
+let titleURL = tmp.appendingPathComponent("title-font.txt")
+try titleText.write(to: titleURL, atomically: true, encoding: .utf8)
+let titleBook = TextBook(fileURL: titleURL, rawText: titleText, encodingName: "UTF-8")
+check(titleBook.chapters.count == 3, "测试书解析出 3 章（标题字体用）", "\(titleBook.chapters.count)")
+
+let titleView = ReadingView(frame: NSRect(x: 0, y: 0, width: 420, height: 660))
+titleView.book = titleBook
+let bodyLineHeight = titleView.page.lines.first?.height ?? 0
+check(titleView.page.lines.allSatisfy { $0.style == .body },
+      "★ 默认设置下行样式全是正文（同字体模式等价于 M2 之前）")
+check(titleView.page.lines.allSatisfy { abs($0.height - bodyLineHeight) < 0.01 },
+      "★ 默认设置下行高一致（分页基准不会被这个功能改变）")
+let defaultPageEnd = titleView.page.end
+
+titleView.settings.useSameFont = false
+titleView.settings.titleFontName = "Songti SC"
+titleView.settings.titlePointSize = 26
+titleView.settings.followSystemAppearance = false
+titleView.jump(to: 0)
+check(titleView.page.lines.first?.style == .title, "★ 关掉同字体后第一个标题行标记为 title")
+check((titleView.page.lines.first?.height ?? 0) > bodyLineHeight + 1,
+      "★ 标题行高来自标题字体（比正文行高）",
+      "title=\(titleView.page.lines.first?.height ?? 0) body=\(bodyLineHeight)")
+eq(titleView.page.lines.first?.indent ?? -1, 0, "标题行不加首行缩进")
+check(titleView.page.lines.dropFirst().contains { $0.style == .body },
+      "标题之后的正文行仍是 body 样式")
+check(titleView.page.end <= defaultPageEnd,
+      "标题变大后同页装得下的字变少（分页跟着度量走）",
+      "end=\(titleView.page.end) 默认=\(defaultPageEnd)")
+
+// 26.5 切回同字体 → 分页逐字节回到原样（默认基准的回归）
+titleView.settings.useSameFont = true
+titleView.jump(to: 0)
+eq(titleView.page.end, defaultPageEnd, "★ 切回同字体后分页与原样完全一致")
+eq(titleView.page.lines.map(\.style), Array(repeating: LineStyle.body, count: titleView.page.lines.count),
+   "切回同字体后行样式全部回到 body")
+
+// 26.6 标题折行：段落内每一行都要用标题字体（原版 is_title 是按段落算的）
+var wrapLines = ["第一章 这是一个长得离谱的章节标题用来验证折行以后每一行都还使用标题字体"]
+wrapLines.append("")
+for _ in 0..<8 { wrapLines.append("    正文内容正文内容正文内容正文内容正文内容正文内容正文内容") }
+let wrapText = wrapLines.joined(separator: "\n")
+let wrapURL = tmp.appendingPathComponent("title-wrap.txt")
+try wrapText.write(to: wrapURL, atomically: true, encoding: .utf8)
+let wrapBook = TextBook(fileURL: wrapURL, rawText: wrapText, encodingName: "UTF-8")
+let wrapView = ReadingView(frame: NSRect(x: 0, y: 0, width: 160, height: 660))
+wrapView.book = wrapBook
+wrapView.settings.useSameFont = false
+wrapView.settings.titleFontName = "Songti SC"
+wrapView.settings.titlePointSize = 26
+wrapView.jump(to: 0)
+let leadingTitleLines = wrapView.page.lines.prefix { $0.style == .title }.count
+check(leadingTitleLines >= 2, "★ 标题折行后续行仍用标题字体（不是只有第一行）",
+      "标题行数=\(leadingTitleLines) 总行数=\(wrapView.page.lines.count)")
+check(wrapView.page.lines.dropFirst(leadingTitleLines).allSatisfy { $0.style == .body },
+      "标题段落之后的正文行都是 body 样式")
+
+// 26.7 设置界面：同字体模式下标题控件置灰，取消勾选后立即可编辑
+let titleStore = LibraryStore(fileURL: tmp.appendingPathComponent("title-settings.dat"))
+titleStore.load()
+let titleWC = SettingsWindowController(store: titleStore) { }
+check(titleStore.settings.useSameFont, "新建的设置里「同字体」默认勾选")
+let sameEnabled = titleWC.debugTitleControlsEnabled
+check(!sameEnabled.font && !sameEnabled.size && !sameEnabled.color,
+      "★ 同字体模式下标题字体 / 字号 / 颜色置灰（不生效的控件不该看着能点）")
+titleWC.debugSetTitleSameFont(false)
+check(!titleStore.settings.useSameFont, "★ 取消勾选后立刻写进设置")
+let separateEnabled = titleWC.debugTitleControlsEnabled
+check(separateEnabled.font && separateEnabled.size && separateEnabled.color,
+      "★ 取消勾选后标题字体 / 字号 / 颜色可编辑")
+titleWC.debugSetTitleSameFont(true)
+check(titleStore.settings.useSameFont, "★ 重新勾上又回到同字体（写回 use_same_font=1）")
+
+// 26.8 页首落在标题**区间内**时，续行仍是标题（原版 Book::IsChapter 是区间判定）
+//
+// 回归：一开始 paragraphIsTitle 初值写死 false，只有「段落开头」才重新判断，
+// 于是一页从长标题中间开始时，该页的续行会掉回正文字体 —— 而原版
+// IsChapter(idx) 判的是 idx ∈ [ch.index, ch.index + title_len)，续行仍是标题。
+var longTitleLines = ["第一章 " + String(repeating: "很长很长的标题文字", count: 8)]
+longTitleLines.append("")
+for _ in 0..<10 { longTitleLines.append("    正文内容正文内容正文内容正文内容正文内容正文内容") }
+let longTitleText = longTitleLines.joined(separator: "\n")
+let longTitleURL = tmp.appendingPathComponent("title-long.txt")
+try longTitleText.write(to: longTitleURL, atomically: true, encoding: .utf8)
+let longTitleBook = TextBook(fileURL: longTitleURL, rawText: longTitleText, encodingName: "UTF-8")
+check(longTitleBook.chapters.count == 1, "长标题测试书解析出 1 章", "\(longTitleBook.chapters.count)")
+let titleRange = longTitleBook.chapters[0].index
+    ..< (longTitleBook.chapters[0].index + longTitleBook.chapters[0].titleLength)
+let longTitleView = ReadingView(frame: NSRect(x: 0, y: 0, width: 160, height: 660))
+longTitleView.book = longTitleBook
+longTitleView.settings.useSameFont = false
+longTitleView.settings.titleFontName = "Songti SC"
+longTitleView.settings.titlePointSize = 40
+longTitleView.jump(to: 0)
+check(longTitleView.page.end < titleRange.upperBound,
+      "★ 前置条件：第 1 页在长标题中间就排满了", "页末=\(longTitleView.page.end) 标题区=\(titleRange)")
+longTitleView.goNextPage()
+check(longTitleView.page.start < titleRange.upperBound,
+      "第 2 页仍从标题区间内开始（这样才能测到续行的样式）",
+      "页首=\(longTitleView.page.start)")
+let continuationLines = longTitleView.page.lines.filter { $0.start < titleRange.upperBound }
+check(!continuationLines.isEmpty, "第 2 页上有标题续行")
+check(continuationLines.allSatisfy { $0.style == .title },
+      "★ 从标题中间开始的续页，续行仍用标题字体（不能掉回正文）",
+      "样式=\(continuationLines.map { $0.style == .title ? "T" : "b" })")
+
+// 26.9 跟随系统时标题用系统配色（深色模式下默认黑色标题会看不见）
+var darkTitle = ReaderSettings()
+darkTitle.useSameFont = false
+darkTitle.followSystemAppearance = true
+eq(darkTitle.renderTitleColor(dark: true).colorRef, ReaderDefaults.darkTextColor.colorRef,
+   "★ 跟随系统时标题用系统深色配色")
+eq(darkTitle.renderTitleColor(dark: false).colorRef, ReaderDefaults.defaultTextColor.colorRef,
+   "跟随系统时浅色模式标题用系统浅色配色")
+darkTitle.useSameFont = true
+eq(darkTitle.renderTitleColor(dark: true).colorRef, darkTitle.renderTextColor(dark: true).colorRef,
+   "同字体模式下标题色 = 正文色")
+
+// 26.10 缺 font_title 的存档写回时退回默认 LOGFONT（不能写空对象）
+// 背景：CacheCodec.decode 不会补齐缺键，而 Windows 版读到 {} 的 LOGFONT 会丢字体。
+var sparseHeader: [String: JSONValue] = [:]
+var sparseSettings = ReaderSettings()
+sparseSettings.titleFontName = "Songti SC"
+sparseSettings.titlePointSize = 30
+sparseSettings.apply(to: &sparseHeader)
+let sparseFontTitle = sparseHeader["font_title"]
+eq(sparseFontTitle?.field("lfHeight")?.intValue, -40,
+   "★ 缺 font_title 时写回完整 LOGFONT（30pt → -40px，而不是空对象）")
+eq(sparseFontTitle?.field("lfFaceName")?.stringValue, "Songti SC",
+   "缺 font_title 时写回标题字体名")
+check((sparseFontTitle?.field("lfWeight")?.intValue ?? 0) != 0,
+      "退回默认 LOGFONT 时保留其它字段（lfWeight 非 0）")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

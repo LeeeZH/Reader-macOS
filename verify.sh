@@ -125,16 +125,32 @@ else
     exit 1
 fi
 
+step "4.12/5 分页 golden 比对（--dump-pages 必须与基准逐字节一致）"
+# 逐页的「页首偏移 / 覆盖字数 / 行数」是 Windows parity 的唯一自动化判据。
+# 任何触碰排版（字体、行距、边距、标题字体…）的改动都必须跑这一步：
+# 默认设置下这里变了，就说明老用户的阅读位置会整体错位。
+"$BIN" --dump-pages "$ROOT/samples/古文观止.txt" >"$OUT/pages.tsv" 2>"$OUT/pages.log"
+if diff -q "$ROOT/samples/golden-pages.tsv" "$OUT/pages.tsv" >/dev/null; then
+    echo "  ✅ 分页与基准一致（$(($(wc -l <"$OUT/pages.tsv") - 1)) 页）· $(tail -1 "$OUT/pages.log")"
+else
+    echo "  ❌ 分页与基准不一致："
+    diff "$ROOT/samples/golden-pages.tsv" "$OUT/pages.tsv" | head -20
+    exit 1
+fi
+
 step "5/5 离屏渲染"
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page.png" 2 2>&1 | tail -1
 "$BIN" --dark --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-dark.png" 2 2>&1 | tail -1
 "$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-find.png" 0 --find "之" 2>&1 | tail -1
+# 章节标题独立字体（M3）：同一页换标题字体各渲一张，肉眼对比用
+"$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-title-same.png" 0 2>&1 | tail -1
+"$BIN" --render-page "$ROOT/samples/古文观止.txt" "$OUT/page-title-separate.png" 0 \
+    --title-font "Songti SC" --title-size 26 2>&1 | tail -1
 "$BIN" --render-library "$OUT/library.png" 2>&1 | tail -1
 "$BIN" --render-settings "$OUT/settings.png" 2>&1 | tail -1
 "$BIN" --render-bookmarks "$OUT/bookmarks.png" 2>&1 | tail -1
 "$BIN" --render-chapter-search "$OUT/chapter-search.png" 2>&1 | tail -1
 "$BIN" --render-find "$OUT/find.png" "之" 2>&1 | tail -1
-"$BIN" --dump-pages "$ROOT/samples/古文观止.txt" 2>&1 >"$OUT/pages.tsv" | tail -1
 
 echo
 echo "✅ 全部通过。渲染产物在 $OUT/"

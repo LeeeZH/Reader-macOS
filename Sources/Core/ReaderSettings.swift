@@ -11,6 +11,17 @@ struct ReaderSettings {
     var backgroundColorRef: UInt32 = 0x00FFFFFF
     var alpha: Int = 0xFF
 
+    /// 章节标题是否与正文「同字体同色」——原版 `header.use_same_font`，默认 1。
+    ///
+    /// 这个字段的语义和前两个**绑在一起**（见原版 `Page::SelectFont`）：
+    /// 为 1 时标题行连 `font_title` / `font_color_title` 都不看，整行走正文那套；
+    /// 为 0 时标题段落才切到下面这套字体与颜色。
+    /// 直接读写原版字段，不新增自定义键 —— Windows 存档里的标题字体过来就能生效。
+    var useSameFont: Bool = true
+    /// 标题字体（原版 `header.font_title` 的 LOGFONT，点值换算与正文相同）
+    var titleFontName: String = ReaderDefaults.fontName
+    var titlePointSize: CGFloat = ReaderDefaults.fontSize
+
     var charGap: Int = 0
     var lineGap: Int = 5
     var paragraphGap: Int = 15
@@ -116,6 +127,13 @@ struct ReaderSettings {
         // LOGFONT.lfHeight 是 96 DPI 下的**像素**高（负数）；点值 = 像素 × 72 / 96
         fontPointSize = max(6, min(96, CGFloat(-lfHeight) * 72.0 / 96.0))
 
+        // 标题字体：默认值与正文相同（原版 default_header 里 font_title = logoFont()），
+        // 所以「没配过标题字体」的存档读出来仍是同字体，渲染结果与 M2 之前逐像素一致。
+        useSameFont = b("use_same_font")
+        titleFontName = fontField("lfFaceName", header, d, in: "font_title")
+        let titleLfHeight = fontFieldInt("lfHeight", header, d, in: "font_title", fallback: -19)
+        titlePointSize = max(6, min(96, CGFloat(-titleLfHeight) * 72.0 / 96.0))
+
         textColorRef = UInt32(truncatingIfNeeded: i("font_color"))
         titleColorRef = UInt32(truncatingIfNeeded: i("font_color_title"))
         backgroundColorRef = UInt32(truncatingIfNeeded: i("bg_color"))
@@ -180,30 +198,53 @@ struct ReaderSettings {
         }
     }
 
-    private func fontField(_ key: String, _ h: [String: JSONValue], _ d: [String: JSONValue]) -> String {
-        h["font"]?.field(key)?.stringValue ?? d["font"]?.field(key)?.stringValue ?? ""
+    /// 读某个 LOGFONT 字段。`in` 是 header 里的字体对象名：正文 `font`、标题 `font_title`。
+    private func fontField(_ key: String, _ h: [String: JSONValue], _ d: [String: JSONValue],
+                           in parent: String = "font") -> String {
+        h[parent]?.field(key)?.stringValue ?? d[parent]?.field(key)?.stringValue ?? ""
     }
-    private func fontFieldInt(_ key: String, _ h: [String: JSONValue], _ d: [String: JSONValue], fallback: Int) -> Int {
-        h["font"]?.field(key)?.intValue ?? d["font"]?.field(key)?.intValue ?? fallback
+    private func fontFieldInt(_ key: String, _ h: [String: JSONValue], _ d: [String: JSONValue],
+                              in parent: String = "font", fallback: Int) -> Int {
+        h[parent]?.field(key)?.intValue ?? d[parent]?.field(key)?.intValue ?? fallback
     }
 
     // MARK: 写回 header
+
+    /// 把字体名 / 字号写回某个 LOGFONT 对象（正文 `font` / 标题 `font_title`）。
+    ///
+    /// ⚠️ 存档里**完全没有**这个键（或是个空对象）时必须退回默认 LOGFONT。
+    /// 直接写 `{}` 会让 Windows 版读到 lfHeight / lfFaceName 全 0 的字体 —— 字体就没了。
+    /// `CacheCodec.decode` 不会补齐缺键（只有写盘时 `normalizedHeader` 才按顺序补），
+    /// 所以这种「不完整但合法」的存档真能出现。
+    private func writeFont(_ parent: String, name: String, pointSize: CGFloat,
+                           to header: inout [String: JSONValue]) {
+        var lf: [(String, JSONValue)]
+        if let cur = header[parent]?.objectValue, !cur.isEmpty {
+            lf = cur
+        } else if let def = CacheSchema.defaultHeader()[parent]?.objectValue {
+            lf = def
+        } else {
+            return
+        }
+        let pixel = -Int((pointSize * 96.0 / 72.0).rounded())
+        for i in lf.indices {
+            switch lf[i].0 {
+            case "lfHeight":    lf[i].1 = .int(pixel)
+            case "lfFaceName":  lf[i].1 = .string(name)
+            default: break
+            }
+        }
+        header[parent] = .object(lf)
+    }
 
     func apply(to header: inout [String: JSONValue]) {
         func set(_ k: String, _ v: JSONValue) { header[k] = v }
 
         // 字体：写回 LOGFONT（lfHeight 由点值换算成 96 DPI 像素高）
-        if case .object(var lf) = header["font"] ?? .object([]) {
-            let pixel = -Int((fontPointSize * 96.0 / 72.0).rounded())
-            for i in lf.indices {
-                switch lf[i].0 {
-                case "lfHeight":    lf[i].1 = .int(pixel)
-                case "lfFaceName":  lf[i].1 = .string(fontName)
-                default: break
-                }
-            }
-            set("font", .object(lf))
-        }
+        writeFont("font", name: fontName, pointSize: fontPointSize, to: &header)
+        // 标题字体：同一个 LOGFONT 结构，只换字段来源
+        writeFont("font_title", name: titleFontName, pointSize: titlePointSize, to: &header)
+        set("use_same_font", .int(useSameFont ? 1 : 0))
 
         set("font_color", .int(Int(textColorRef)))
         set("font_color_title", .int(Int(titleColorRef)))
@@ -255,6 +296,8 @@ struct ReaderSettings {
     // ⚠️ Win32 的 COLORREF 是 0x00BBGGRR（BGR 顺序），不是 RGB
 
     var textColor: CGColor { CGColor.fromColorRef(textColorRef) }
+    /// 标题的自定义颜色（`useSameFont` 为真时原版不用它）
+    var titleColor: CGColor { CGColor.fromColorRef(titleColorRef) }
     var backgroundColor: CGColor { CGColor.fromColorRef(backgroundColorRef) }
 
     /// 实际用于渲染的颜色：跟随系统时用系统配色，否则用用户自定义的
@@ -266,8 +309,21 @@ struct ReaderSettings {
         followSystemAppearance ? (dark ? ReaderDefaults.darkBackgroundColor : ReaderDefaults.defaultBackgroundColor) : backgroundColor
     }
 
+    /// 标题实际用于渲染的颜色。
+    ///
+    /// 和原版 `Page::SelectFont` 一致：`useSameFont` 时标题**连颜色也**跟着正文，
+    /// 此时 `font_color_title` 根本不被读取。只有关掉同字体后，标题颜色才有意义：
+    /// 跟随系统时仍用系统配色（否则深色模式下默认黑色标题会看不见），否则用自定义值。
+    func renderTitleColor(dark: Bool) -> CGColor {
+        if useSameFont { return renderTextColor(dark: dark) }
+        if followSystemAppearance { return dark ? ReaderDefaults.darkTextColor : ReaderDefaults.defaultTextColor }
+        return CGColor.fromColorRef(titleColorRef)
+    }
+
     /// 实际用于渲染的字体名（Windows 字体不存在时回退到苹方）
     var renderFontName: String { FontResolver.resolve(fontName) }
+    /// 标题实际用于渲染的字体名（同上，回退规则一致）
+    var renderTitleFontName: String { FontResolver.resolve(titleFontName) }
     /// 是否发生了字体回退（UI 可据此提示用户）
     var didFallbackFont: Bool { FontResolver.needsFallback(fontName) }
 }

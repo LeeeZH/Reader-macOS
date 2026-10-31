@@ -14,6 +14,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var fontPopup: NSPopUpButton!
     private var sizeSlider: NSSlider!
     private var sizeLabel: NSTextField!
+    private var titleSameFontCheck: NSButton!
+    private var titleFontPopup: NSPopUpButton!
+    private var titleSizeSlider: NSSlider!
+    private var titleSizeLabel: NSTextField!
+    private var titleColorWell: NSColorWell!
     private var textColorWell: NSColorWell!
     private var bgColorWell: NSColorWell!
     private var followSystemCheck: NSButton!
@@ -80,6 +85,16 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     var debugColorWellsEnabled: Bool { (textColorWell?.isEnabled ?? false) && (bgColorWell?.isEnabled ?? false) }
     /// 自检用：「窗口置顶」复选框的勾选状态（要和菜单 / 托盘联动）
     var debugKeepOnTopChecked: Bool { keepOnTopCheck?.state == .on }
+    /// 自检用：章节标题那组的可编辑状态（同字体模式下三个控件都该置灰）
+    var debugTitleControlsEnabled: (font: Bool, size: Bool, color: Bool) {
+        (titleFontPopup?.isEnabled ?? false, titleSizeSlider?.isEnabled ?? false,
+         titleColorWell?.isEnabled ?? false)
+    }
+    /// 自检用：勾/取消「章节标题与正文用同一字体和颜色」（走和真实点击同一条刷新路径）
+    func debugSetTitleSameFont(_ same: Bool) {
+        titleSameFontCheck.state = same ? .on : .off
+        titleSameFontChanged()
+    }
 
     /// 自动翻页是运行时状态（不在存档里），由外部提供
     var onToggleAutoPage: (() -> Void)?
@@ -266,6 +281,33 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         followSystemCheck = NSButton(checkboxWithTitle: "跟随系统深色模式（忽略上面两个颜色）",
                                      target: self, action: #selector(followSystemChanged))
         grid.addRow(with: [NSGridCell.emptyContentView, followSystemCheck])
+
+        // ── 章节标题（原版 use_same_font / font_title / font_color_title）──
+        // 默认勾上：与正文同字体同色，渲染结果和加这个功能之前完全一样。
+        // 取消勾选后下面三行才生效 —— 和原版 DisplaySet.cpp 一样在同字体模式下置灰，
+        // 而不是留着控件让人点了没反应。
+        section(grid, "章节标题")
+        titleSameFontCheck = NSButton(checkboxWithTitle: "章节标题与正文用同一字体和颜色",
+                                      target: self, action: #selector(titleSameFontChanged))
+        grid.addRow(with: [NSGridCell.emptyContentView, titleSameFontCheck])
+
+        titleFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        titleFontPopup.target = self
+        titleFontPopup.action = #selector(titleFontChanged)
+        populateFonts(for: titleFontPopup, current: store.settings.titleFontName)
+        grid.addRow(with: [label("标题字体"), titleFontPopup])
+
+        titleSizeSlider = NSSlider(value: 14, minValue: 8, maxValue: 72,
+                                   target: self, action: #selector(titleSizeChanged))
+        titleSizeSlider.isContinuous = true
+        titleSizeLabel = NSTextField(labelWithString: "14 pt")
+        titleSizeLabel.textColor = .secondaryLabelColor
+        grid.addRow(with: [label("标题字号"), titleSizeSlider, titleSizeLabel])
+
+        titleColorWell = NSColorWell(frame: .zero)
+        titleColorWell.target = self
+        titleColorWell.action = #selector(titleColorChanged)
+        grid.addRow(with: [label("标题颜色"), titleColorWell])
 
         section(grid, "排版")
         charGapSlider = addSliderRow(grid, "字距", 0, 10, 0, #selector(spacingChanged))
@@ -465,22 +507,39 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     private func populateFonts() {
-        let current = store.settings.fontName
+        populateFonts(for: fontPopup, current: store.settings.fontName)
+    }
+
+    /// 把系统字体族填进指定的下拉框（正文 / 标题共用）。
+    private func populateFonts(for popup: NSPopUpButton, current: String) {
         let families = NSFontManager.shared.availableFontFamilies.sorted()
-        fontPopup.removeAllItems()
+        popup.removeAllItems()
         if !families.contains(current) {
             // 存档里是 Windows 字体（本机没有）→ 放到最前面并标注
-            fontPopup.addItem(withTitle: "\(current)（本机没有，自动回退）")
-            fontPopup.lastItem?.representedObject = current
+            popup.addItem(withTitle: "\(current)（本机没有，自动回退）")
+            popup.lastItem?.representedObject = current
         }
         for f in families {
-            fontPopup.addItem(withTitle: f)
-            fontPopup.lastItem?.representedObject = f
+            popup.addItem(withTitle: f)
+            popup.lastItem?.representedObject = f
         }
-        for item in fontPopup.itemArray where (item.representedObject as? String) == current {
-            fontPopup.select(item)
-            break
+        selectPopup(popup, current)
+    }
+
+    private func selectPopup(_ popup: NSPopUpButton, _ value: String) {
+        for item in popup.itemArray where (item.representedObject as? String) == value {
+            popup.select(item)
+            return
         }
+    }
+
+    /// 同字体模式下标题的字体 / 字号 / 颜色都不生效 —— 置灰，别让人以为坏了。
+    private func updateTitleControlsEnabled() {
+        let on = titleSameFontCheck.state == .off
+        titleFontPopup.isEnabled = on
+        titleSizeSlider.isEnabled = on
+        titleColorWell.isEnabled = on
+        titleSizeLabel.textColor = on ? .secondaryLabelColor : .tertiaryLabelColor
     }
 
     // MARK: - 同步
@@ -495,7 +554,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             break
         }
         sizeSlider.doubleValue = Double(s.fontPointSize)
-        sizeLabel.stringValue = "\(Int(s.fontPointSize)) pt"
+        // 取整到最接近的点值：LOGFONT 存的是整数像素，14pt ↔ -19px ↔ 14.25pt，
+        // 往回收的时候四舍五入才还原得出用户当初选的数（直接截断会显示 21）。
+        sizeLabel.stringValue = "\(Int(s.fontPointSize.rounded())) pt"
         // 跟随系统时，色块显示**实际生效**的系统配色 —— 否则显示的是存档里
         // 那两个没被使用的值，等于在骗人。
         let dark = isDarkAppearance
@@ -507,6 +568,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             bgColorWell.color = NSColor(cgColor: s.backgroundColor) ?? .white
         }
         followSystemCheck.state = s.followSystemAppearance ? .on : .off
+
+        // ── 章节标题 ──
+        titleSameFontCheck.state = s.useSameFont ? .on : .off
+        selectPopup(titleFontPopup, s.titleFontName)
+        titleSizeSlider.doubleValue = Double(s.titlePointSize)
+        titleSizeLabel.stringValue = "\(Int(s.titlePointSize.rounded())) pt"
+        // 与正文两个色块同样的规矩：跟随系统时显示**实际生效**的颜色，
+        // 否则显示存档里的自定义值（哪怕当前没被用上，至少不是骗人的）。
+        titleColorWell.color = s.followSystemAppearance
+            ? (NSColor(cgColor: s.renderTitleColor(dark: dark)) ?? .black)
+            : (NSColor(cgColor: s.titleColor) ?? .black)
+        updateTitleControlsEnabled()
         let pct = Int(round(Double(s.alpha) / 255.0 * 100))
         alphaSlider.doubleValue = Double(max(10, min(100, pct)))
         alphaLabel.stringValue = "\(max(10, min(100, pct)))%"
@@ -635,6 +708,36 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     @objc private func hideChromeChanged() {
         let on = hideChromeCheck.state == .on
         apply { $0.hideChrome = on }
+    }
+
+    // MARK: - 章节标题
+
+    @objc private func titleSameFontChanged() {
+        apply { $0.useSameFont = titleSameFontCheck.state == .on }
+        updateTitleControlsEnabled()
+    }
+
+    @objc private func titleFontChanged() {
+        guard let name = titleFontPopup.selectedItem?.representedObject as? String else { return }
+        apply { $0.titleFontName = name }
+    }
+
+    @objc private func titleSizeChanged() {
+        let v = CGFloat(titleSizeSlider.doubleValue.rounded())
+        titleSizeLabel.stringValue = "\(Int(v)) pt"
+        apply { $0.titlePointSize = v }
+    }
+
+    @objc private func titleColorChanged() {
+        let ref = colorRef(from: titleColorWell)
+        apply {
+            $0.titleColorRef = ref
+            // 和正文取色一致：用户显式选色就退出「跟随系统」，否则选了也不生效
+            $0.followSystemAppearance = false
+        }
+        // 退出「跟随系统」会同时改变正文/背景的实际配色，整块面板要一起刷新 ——
+        // 否则正文色块还显示着系统配色，看起来像「点了标题色、正文图标错了」。
+        syncFromSettings()
     }
 
     private func makeMousePopup(_ actions: [ReaderSettings.MouseAction],
@@ -776,6 +879,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             let fresh = ReaderSettings()
             s.fontName = fresh.fontName
             s.fontPointSize = fresh.fontPointSize
+            s.useSameFont = fresh.useSameFont
+            s.titleFontName = fresh.titleFontName
+            s.titlePointSize = fresh.titlePointSize
+            s.titleColorRef = fresh.titleColorRef
             s.textColorRef = fresh.textColorRef
             s.backgroundColorRef = fresh.backgroundColorRef
             s.followSystemAppearance = fresh.followSystemAppearance

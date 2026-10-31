@@ -54,6 +54,22 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-page"),
            let a = Int(CommandLine.arguments[ai + 1]) {
             view.settings.alpha = min(255, max(0, a))
         }
+        // --title-font <名字> [--title-size <pt>]：预览「章节标题独立字体」的效果
+        // （等价于关掉设置里的「章节标题与正文用同一字体」）。
+        // 截图对比 M3 前后就靠它：不带参数 = 默认同字体，带上 = 标题换字号/字体。
+        if let ti = CommandLine.arguments.firstIndex(of: "--title-font"),
+           CommandLine.arguments.count > ti + 1 {
+            let name = CommandLine.arguments[ti + 1]
+            var size = view.settings.fontPointSize
+            if let si = CommandLine.arguments.firstIndex(of: "--title-size"),
+               CommandLine.arguments.count > si + 1,
+               let s = Double(CommandLine.arguments[si + 1]) {
+                size = CGFloat(s)
+            }
+            view.settings.useSameFont = false
+            view.settings.titleFontName = name
+            view.settings.titlePointSize = size
+        }
         for _ in 0..<pages { view.goNextPage() }
         // 可选：--find <查询词> 把命中高亮画出来并跳到第一处（检查高亮效果用）
         if let fi = CommandLine.arguments.firstIndex(of: "--find"),

@@ -13,7 +13,7 @@ final class ReadingView: NSView {
     /// 显示设置。改动会重建字体度量并整页重排。
     var settings = ReaderSettings() {
         didSet {
-            metrics = TextMetrics(name: settings.renderFontName, size: settings.fontPointSize)
+            rebuildMetrics()
             relayout()
         }
     }
@@ -37,9 +37,29 @@ final class ReadingView: NSView {
     var onProgressChange: ((Int) -> Void)?
 
     private var metrics = TextMetrics()
+    /// 标题的字体度量。
+    ///
+    /// `useSameFont` 时**故意留 nil**：直接复用正文那套度量，
+    /// 这样默认设置下的行宽、行高与 M2 之前逐像素一致（golden-pages 基准不许变）。
+    /// 只有用户关掉「章节标题与正文同字体」才会多建一套。
+    private var titleMetrics: TextMetrics?
     private(set) var page: PageBox = .empty
     private(set) var pageStart: Int = 0
     private var lastReportedOffset = -1
+
+    /// 按当前设置重建字体度量（正文 + 可选的标题）
+    private func rebuildMetrics() {
+        metrics = TextMetrics(name: settings.renderFontName, size: settings.fontPointSize)
+        titleMetrics = settings.useSameFont
+            ? nil
+            : TextMetrics(name: settings.renderTitleFontName, size: settings.titlePointSize)
+    }
+
+    /// 取某一行该用的度量。标题度量不存在（同字体模式）就退回正文。
+    private func metrics(for style: LineStyle) -> TextMetrics {
+        guard style == .title, let t = titleMetrics else { return metrics }
+        return t
+    }
 
     // MARK: 全文搜索高亮状态
 
@@ -115,8 +135,9 @@ final class ReadingView: NSView {
         let height = bounds.height - CGFloat(settings.insetTop) - CGFloat(settings.insetBottom)
         guard width > 20, height > 20 else { return PageBox(start: start, length: 0, lines: []) }
 
-        let lineHeight = metrics.lineHeight
-        let indentWidth = metrics.advance(0x3000) * 2      // 首行缩进 = 两个全角空格宽
+        // 首行缩进 = 两个全角空格宽。**始终按正文字体算** —— 缩进属于正文段落，
+        // 标题行本来就不缩进（Page.cpp:753），这样默认设置下与 M2 之前完全一致。
+        let indentWidth = metrics.advance(0x3000) * 2
         let charGap = CGFloat(settings.charGap)
         let lineGap = CGFloat(settings.lineGap)
         let paragraphGap = CGFloat(settings.paragraphGap)
@@ -125,11 +146,30 @@ final class ReadingView: NSView {
         var y: CGFloat = 0
         var i = max(0, min(start, units.count))
         var pageEnd = i
+        /// 当前段落是不是章节标题。
+        ///
+        /// 原版是一次处理一个段落（`ParagraphToLines` 的 `is_title = IsChapter(start)`），
+        /// 标题段落里**每一行**都用标题字体，包括折行后的续行。
+        /// 我们这里按行迭代，所以要把段落的「标题性」带到续行上，否则长标题第二行
+        /// 会突然变小。
+        ///
+        /// ⚠️ 初值必须按**字符区间**判定，不能写 false：原版 `Book::IsChapter`
+        /// 判的是 `idx >= ch.index && idx < ch.index + title_len`（Book.cpp:260-268），
+        /// 所以当一页从「长标题的中间」开始（翻页、`leftLineCount` 重叠行、
+        /// 跳转到标题内偏移、平滑滚动的下一页）时，原版那一页的续行仍然算标题；
+        /// 写成 false 会让标题在换页处突然掉回正文字体。
+        var paragraphIsTitle = book.isChapterTitle(at: i)
 
         while i < units.count {
             // 段落首行 → 首行缩进（对应 Page.cpp:753）
             let isParagraphStart = (i == 0) || (units[i - 1] == 0x0A)
-            let isTitle = isParagraphStart && book.isChapterTitle(at: i)
+            if isParagraphStart { paragraphIsTitle = book.isChapterTitle(at: i) }
+            let isTitle = paragraphIsTitle
+            // 同字体模式不建标题度量，这里自然全走正文 —— 也就是原版 dc 0。
+            let titleStyleApplies = isTitle && !settings.useSameFont && titleMetrics != nil
+            let lineMetrics = titleStyleApplies ? (titleMetrics ?? metrics) : metrics
+            let lineHeight = lineMetrics.lineHeight
+            let lineStyle: LineStyle = titleStyleApplies ? .title : .body
             let logicalStart = i
             var indent: CGFloat = 0
             // 对应 Page.cpp:753：首行缩进仅用于正文段落，章节标题不加缩进
@@ -153,7 +193,7 @@ final class ReadingView: NSView {
             while fitEnd < units.count {
                 let u = units[fitEnd]
                 if u == 0x0A { break }
-                let (adv, cluster) = metrics.measure(units, at: fitEnd)
+                let (adv, cluster) = lineMetrics.measure(units, at: fitEnd)
                 if fitEnd > contentStart, x + adv > width { break }
                 x += adv + charGap                              // 行末也计一次 gap（Page.cpp:885）
                 fitEnd += cluster
@@ -178,7 +218,7 @@ final class ReadingView: NSView {
             var chars = [CharBox]()
             var j = contentStart
             while j < lineEnd {
-                let (adv, cluster) = metrics.measure(units, at: j)
+                let (adv, cluster) = lineMetrics.measure(units, at: j)
                 chars.append(CharBox(index: j, advance: adv, cluster: cluster))
                 j += cluster
             }
@@ -198,7 +238,7 @@ final class ReadingView: NSView {
 
             // 死循环保护：单字宽于整行时强制前进（对应 Page.cpp:776-779）
             if chars.isEmpty, consumed == logicalStart {
-                let (_, cluster) = metrics.measure(units, at: logicalStart)
+                let (_, cluster) = lineMetrics.measure(units, at: logicalStart)
                 chars.append(CharBox(index: logicalStart, advance: 0, cluster: cluster))
                 consumed = logicalStart + cluster
                 gap = lineGap
@@ -208,7 +248,7 @@ final class ReadingView: NSView {
             if y + lineHeight + gap > height, !lines.isEmpty { break }
 
             lines.append(LineBox(start: logicalStart, length: consumed - logicalStart, chars: chars,
-                                 indent: indent, height: lineHeight, gap: gap))
+                                 indent: indent, height: lineHeight, gap: gap, style: lineStyle))
             y += lineHeight + gap
             pageEnd = consumed
             i = consumed
@@ -554,56 +594,63 @@ final class ReadingView: NSView {
         ctx.clip(to: contentRect)
 
         let units = book.units
-        ctx.setFillColor(settings.renderTextColor(dark: dark))
         ctx.textMatrix = .identity
 
         // AppKit 的 y 轴向上：内容要「往上滚出屏幕」就得让 y 变大，所以这里是 **加**。
         // 写成减号的话会把正文往下推、顶部留白，方向正好相反。
         var top = bounds.height - CGFloat(settings.insetTop) + scrollOffset
-        drawLines(page.lines, units: units, top: &top, ctx: ctx)
+        drawLines(page.lines, units: units, top: &top, dark: dark, ctx: ctx)
         // 下一页接在下面继续画，把滚出来的空白填满。
         // 两页在文本上首尾相接，所以堆起来是连续的。
         if scrollOffset > 0, !nextPage.lines.isEmpty {
-            drawLines(nextPage.lines, units: units, top: &top, ctx: ctx)
+            drawLines(nextPage.lines, units: units, top: &top, dark: dark, ctx: ctx)
         }
 
         ctx.restoreGState()
     }
 
-    private func drawLines(_ lines: [LineBox], units: [UInt16], top: inout CGFloat, ctx: CGContext) {
+    private func drawLines(_ lines: [LineBox], units: [UInt16], top: inout CGFloat,
+                           dark: Bool, ctx: CGContext) {
         for line in lines {
-            let baseline = top - metrics.ascent
+            let m = metrics(for: line.style)
+            let baseline = top - m.ascent
             // 高亮必须在文字之前画（填在字下面），否则会盖住字形
             drawSearchHighlights(in: line, top: top, ctx: ctx)
+            // 颜色逐行设置：标题行在「独立字体」模式下用 font_color_title
+            // （对应原版 SelectFont 切到 dc 1 时一起换掉的 TextColor）。
+            ctx.setFillColor(line.style == .title
+                             ? settings.renderTitleColor(dark: dark)
+                             : settings.renderTextColor(dark: dark))
             var x = CGFloat(settings.insetLeft) + line.indent
             for cb in line.chars {
-                drawChar(units, cb.index, at: CGPoint(x: x, y: baseline), ctx: ctx)
+                drawChar(units, cb.index, at: CGPoint(x: x, y: baseline), font: m.font, ctx: ctx)
                 x += cb.advance + CGFloat(settings.charGap)
             }
             top -= (line.height + line.gap)
         }
     }
 
-    private func drawChar(_ units: [UInt16], _ idx: Int, at p: CGPoint, ctx: CGContext) {
+    private func drawChar(_ units: [UInt16], _ idx: Int, at p: CGPoint,
+                          font: CTFont, ctx: CGContext) {
         guard idx >= 0, idx < units.count else { return }
         let c = units[idx]
         if c >= 0xD800, c <= 0xDBFF, idx + 1 < units.count,
            units[idx + 1] >= 0xDC00, units[idx + 1] <= 0xDFFF {
             var pair: [UniChar] = [c, units[idx + 1]]
             var glyphs = [CGGlyph](repeating: 0, count: 2)
-            if CTFontGetGlyphsForCharacters(metrics.font, &pair, &glyphs, 2), glyphs[0] != 0 {
+            if CTFontGetGlyphsForCharacters(font, &pair, &glyphs, 2), glyphs[0] != 0 {
                 var g = glyphs[0]
                 var pos = p
-                CTFontDrawGlyphs(metrics.font, &g, &pos, 1, ctx)
+                CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
             }
             return
         }
         var ch = c
         var glyph = CGGlyph(0)
-        if CTFontGetGlyphsForCharacters(metrics.font, &ch, &glyph, 1), glyph != 0 {
+        if CTFontGetGlyphsForCharacters(font, &ch, &glyph, 1), glyph != 0 {
             var g = glyph
             var pos = p
-            CTFontDrawGlyphs(metrics.font, &g, &pos, 1, ctx)
+            CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
         }
     }
 
@@ -616,8 +663,22 @@ final class ReadingView: NSView {
 
     // MARK: - 平滑滚动
 
+    /// 视口顶部那一行实际占的竖直距离（行高 + 行距）。
+    ///
+    /// 标题行的行高可能比正文大不少，所以不能一律用正文 `metrics.lineHeight`：
+    /// 否则在大标题处「逐行翻」和滚轮一格都滚不到一整行，看起来像卡住。
+    private func lineStep(at offset: CGFloat) -> CGFloat {
+        var y: CGFloat = 0
+        for line in page.lines {
+            let step = line.height + line.gap
+            if offset < y + step { return step }
+            y += step
+        }
+        return metrics.lineHeight + CGFloat(settings.lineGap)
+    }
+
     /// 一行的像素高度（自动翻页「逐行」模式用）
-    var oneLineHeight: CGFloat { metrics.lineHeight + CGFloat(settings.lineGap) }
+    var oneLineHeight: CGFloat { lineStep(at: scrollOffset) }
     /// 一页的像素高度（自动翻页「翻页」模式用）
     var onePageHeight: CGFloat { page.flowHeight }
     /// 还能不能继续往后走（自动翻页用它判断要不要停）
@@ -632,7 +693,7 @@ final class ReadingView: NSView {
     var wheelStepPoints: CGFloat {
         let n = linesPerScroll
         if n == 0 { return max(80, bounds.height * 0.85) }
-        return CGFloat(n) * (metrics.lineHeight + CGFloat(settings.lineGap))
+        return CGFloat(n) * lineStep(at: scrollOffset)
     }
 
     /// 请求滚动 `delta` 像素（正数 = 向下。内容向下滚 = 看到后面的内容）。
