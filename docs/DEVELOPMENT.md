@@ -302,11 +302,12 @@ $B --shortcut-selftest
       `ReadingView` / 查找 / 章节搜索 / 书签面板 / 打开流程都面向协议，
       `BookLoader` 是唯一加载入口；协议扩展给出章节偏移的默认实现，
       新格式只提供 `units` / `chapters` 即可。存档仍然只存路径 + 字符偏移
-- [x] **EPUB（原型，0.3.0）**：零依赖解包（系统 `ditto`）+ container.xml / OPF /
-      spine 解析，纯文字正文一个 spine 一条章节；文本提取用系统 `XMLDocument`
-      （libxml2）纠错 + XPath，`EpubText` 扫描器兜底；章节标题读 `nav.xhtml` /
-      `toc.ncx`（退回 `<title>` / `<h1>` / 「第 N 节」）；能分页 / 搜索 / 书签 / 记进度，
-      编辑模式对只读格式自动置灰。限制见[路线图 M7](ROADMAP.md#m7-epub原型已跑通030-待发版)
+- [x] **EPUB（原型，0.3.0）**：零依赖**内存解包**（自读 ZIP 中央目录 + 系统 zlib；
+      不支持时回退 `ditto`）+ container.xml / OPF / spine 解析，纯文字正文一个 spine
+      一条章节；文本提取用系统 `XMLDocument`（libxml2）纠错 + XPath，`EpubText`
+      扫描器兜底；章节标题读 `nav.xhtml` / `toc.ncx`（退回 `<title>` / `<h1>` / 「第 N 节」）；
+      能分页 / 搜索 / 书签 / 记进度，编辑模式对只读格式自动置灰。
+      限制见[路线图 M7](ROADMAP.md#m7-epub原型已跑通030-待发版)
 - [x] **触控栏支持**：翻页 / 进度 / 换章（上/下一章）/ 书签 / 字号，两侧 popover 收纳长尾操作
 
 尚未实现（进度与顺序看 [路线图](ROADMAP.md)，这里只列结论）：
@@ -356,7 +357,10 @@ Reader/
     │   ├── ChapterSearch.swift   章节搜索（数字 / 中文数字 / 标题模糊）
     │   ├── TextSearch.swift      全文搜索（NSString 匹配 + 非重叠 + 上限）
     │   ├── Book.swift        `Book` 协议 + `BookLoader`（格式分发）+ `TextBook`
-    │   ├── ZipArchive.swift     零依赖 ZIP：`ditto` 解到临时目录，用完即删（EPUB 用）
+    │   ├── ZipReader.swift      自读 ZIP 中央目录 + 系统 zlib 解到内存（EPUB 用）
+    │   ├── ZipArchive.swift     解包门面：内存优先，不支持时回退 `ditto`；目录读取
+    │   ├── ZipInflate.c/.h      极小的 zlib raw inflate 桥接（系统库，非第三方）
+    │   ├── ReaderBridging.h     C 桥接的 Swift 可见声明（`-import-objc-header`）
     │   ├── EpubDocument.swift   EPUB 的 XHTML → 段落 / 标题（XMLDocument + XPath）
     │   ├── EpubText.swift       EPUB 兜底扫描器 + 空白 / 实体规则（独立于 FormatText）
     │   ├── EpubParser.swift     EPUB：container.xml → OPF → nav/NCX → spine → `EpubBook`
@@ -662,18 +666,25 @@ floating 窗口，所以主窗口浮起来之后，设置窗口会被自家主�
 
 ---
 
-### 13. EPUB 原型：为什么用 `ditto` 解包、为什么不复用 `FormatText`
+### 13. EPUB：零依赖解包、独立规范化、nav 目录（A 档）
 
-M7 的实现是**原型级**：先证明「EPUB 值不值得做」这个方向成立，再决定要不要
-自己写 inflate。结论是值得 —— 纯文本 EPUB 已经能正常读，且没有引入任何依赖。
+M7 的实现是**原型级**：先证明「EPUB 值不值得做」这个方向成立，再逐步补细节。
+结论是值得 —— 纯文本 EPUB 已经能正常读，且没有引入任何第三方依赖。
 
-- **ZIP**：`ZipArchive` 调 `/usr/bin/ditto -x -k` 解到临时目录（UUID 命名，
-  `defer` 删除）。好处是 DEFLATE / ZIP64 / 数据描述符 / 扩展属性全都不用管；
-  代价是解包期间会落盘（临时目录里是解压后的体积）。实测 Gutenberg 的
-  *Alice in Wonderland*（EPUB 134 KB、16.3 万码元）打开 + 解析约 **0.17s**
-  （含进程冷启动），所以暂时不值得为它引入 libz 的复杂度和风险。
-  以后书更大 / 更频繁打开时，再考虑用 libz 直接读中央目录 + inflate。
-- **HTML → 文本（A 档：只用系统框架）**：主力是 `EpubDocument`，用 Foundation 的
+**A 档 = 只用 macOS 系统框架/库**（Foundation `XMLDocument` 底层是 libxml2，
+系统 zlib 也是现成的），不引 SwiftPM、不 vendor 任何第三方源码。
+
+- **ZIP（内存解包）**：`ZipReader` 自己读 ZIP 中央目录（EOCD → central directory →
+  local header），store 直接拷贝、deflate 走系统 zlib 的 raw inflate
+  （`inflateInit2(-15)`，经过一个极小的 C 桥接 `Sources/Core/ZipInflate.c`，
+  `build.sh` / `test.sh` 会用 clang 编译它并 `-lz` 链接）。
+  解出来的内容是 `[内部路径: Data]`，**全程不落盘、不起子进程**。
+  只支持 EPUB 实际会遇到的子集（store / deflate、非 ZIP64、非加密）；
+  其余情况 `ZipArchive.withFileMap` 自动回退系统 `ditto` 解临时目录再读进内存，
+  保证「再怪的书也能打开」。实测 Gutenberg *Alice*（188 KB）打开 + 解析约
+  **0.10s**（比 `ditto` 路径的 0.19s 快一倍，且文件系统里不留 `reader-unzip-*`）。
+  代价是整本 zip + 解压结果都在内存里（一本书几十 MB 量级，可接受）。
+- **HTML → 文本（系统框架）**：主力是 `EpubDocument`，用 Foundation 的
   `XMLDocument`（底层就是系统 libxml2）解析 XHTML，再 XPath 取 `//*[local-name()='body']`
   和 `<title>`；`EpubText` 的手写扫描器保留为兜底（DOM 解析失败时仍能出文本）。
   - **解析顺序**：先按**严格 XML** 解析（EPUB 规范要求 XHTML 合法，绝大多数书走这里，

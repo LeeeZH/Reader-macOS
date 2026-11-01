@@ -120,10 +120,10 @@ enum BookLoader {
                  encodingName: decoded.encodingName, chapterRule: chapterRule)
     }
 
-    /// 打开 EPUB（解包 → 解析 → 拼正文 + 章节表）。同步阻塞，调用方负责放后台。
+    /// 打开 EPUB（内存解包 → 解析 → 拼正文 + 章节表）。同步阻塞，调用方负责放后台。
     static func makeEpubBook(url: URL) throws -> Book {
-        try ZipArchive.withExtractedTree(url) { root in
-            try EpubParser.load(extractedRoot: root, bookURL: url)
+        try ZipArchive.withFileMap(url) { files in
+            try EpubParser.load(files: files, bookURL: url)
         }
     }
 

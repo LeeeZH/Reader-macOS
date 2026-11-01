@@ -26,19 +26,29 @@ import json, os, sys
 root, target = sys.argv[1], sys.argv[2]
 files = sys.argv[3:]
 sdk = os.popen("xcrun --show-sdk-path").read().strip()
-args = ["swiftc", "-target", target, "-sdk", sdk] + files
+args = ["swiftc", "-target", target, "-sdk", sdk,
+        "-import-objc-header", os.path.join(root, "Sources/Core/ReaderBridging.h")] + files
 entries = [{"directory": root, "file": f, "arguments": args} for f in files]
 with open(os.path.join(root, "compile_commands.json"), "w") as fh:
     json.dump(entries, fh, indent=2, ensure_ascii=False)
 print("==> compile_commands.json 已生成（%d 个源文件）" % len(entries))
 PY
 
+echo "==> 编译 C 桥接（系统 zlib，零第三方依赖）"
+C_OBJ=()
+while IFS= read -r f; do
+    obj="$BUILD/$(basename "$f" .c).o"
+    clang -O2 -arch arm64 -mmacosx-version-min=13.0 -c "$f" -o "$obj"
+    C_OBJ+=("$obj")
+done < <(find "$ROOT/Sources" -name '*.c' | sort)
+
 echo "==> 编译 ($TARGET)"
 swiftc -O \
     -target "$TARGET" \
     -module-cache-path "$BUILD/modulecache" \
+    -import-objc-header "$ROOT/Sources/Core/ReaderBridging.h" \
     -o "$BUILD/$APP_NAME" \
-    "${SRC[@]}"
+    "${SRC[@]}" "${C_OBJ[@]}" -lz
 
 # ---- 应用图标 ----
 # 用 tools/MakeIcon.swift 处理成符合 macOS 规范的圆角矩形图标：

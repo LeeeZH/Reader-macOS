@@ -2446,6 +2446,43 @@ epubView.jump(to: epubBook.chapters[1].index)
 eq(epubView.page.start, epubBook.chapters[1].index, "能跳到 EPUB 第 2 章起点")
 epubView.book = nil
 
+// 30.6 零依赖 ZIP（ZipReader：自读中央目录 + 系统 zlib，不靠 ditto）
+let zipFiles = try ZipReader.read(epubZip)
+check(zipFiles["OEBPS/ch1.xhtml"] != nil, "★ ZipReader 自己解 ZIP（不调 ditto）")
+eq(zipFiles["OEBPS/ch1.xhtml"],
+   try Data(contentsOf: epubTree.appendingPathComponent("OEBPS/ch1.xhtml")),
+   "解出来的内容与源文件逐字节一致")
+check(zipFiles["META-INF/container.xml"] != nil, "能解 META-INF/container.xml")
+check(zipFiles["OEBPS/nav.xhtml"] != nil, "能解 nav.xhtml")
+let treeFiles = try ZipArchive.readTree(epubTree)
+for (path, expected) in treeFiles {
+    eq(zipFiles[path], expected, "zip 里包含目录文件：\(path)")
+}
+let mappedFiles = try ZipArchive.withFileMap(epubZip) { $0 }
+eq(mappedFiles["OEBPS/ch3.xhtml"], treeFiles["OEBPS/ch3.xhtml"], "withFileMap 走内存路径，内容一致")
+
+let notZipURL = tmp.appendingPathComponent("not-a-zip.epub")
+try "hello".data(using: .utf8)!.write(to: notZipURL)
+do {
+    _ = try ZipReader.read(notZipURL)
+    check(false, "非 zip 输入应抛出可读错误")
+} catch {
+    check(true, "非 zip 输入抛出可读错误（会回退 ditto）")
+}
+
+// 30.7 EPUB 内部路径规范化（防目录穿越 / 去 fragment / 百分号解码）
+eq(EpubParser.resolve(baseDir: "OEBPS", href: "ch1.xhtml#frag"), "OEBPS/ch1.xhtml",
+   "去掉 #fragment")
+eq(EpubParser.resolve(baseDir: "OEBPS", href: "./ch2.xhtml"), "OEBPS/ch2.xhtml", "去掉 ./")
+eq(EpubParser.resolve(baseDir: "OEBPS", href: "../OEBPS/ch1.xhtml"), "OEBPS/ch1.xhtml",
+   ".. 规范化回同一目录")
+eq(EpubParser.resolve(baseDir: "OEBPS", href: "../../../etc/passwd"), nil,
+   "★ 越出书根的路径被拒绝（防目录穿越）")
+eq(EpubParser.resolve(baseDir: "", href: "OEBPS/%E7%AC%AC1.xhtml"), "OEBPS/第1.xhtml",
+   "百分号转义解码")
+eq(EpubParser.resolve(baseDir: "", href: "OEBPS/a%20b.xhtml"), "OEBPS/a b.xhtml",
+   "空格转义解码")
+
 // ============ 汇总 ============
 print("\n" + String(repeating: "─", count: 46))
 print("通过 \(passed) 项，失败 \(failed) 项")

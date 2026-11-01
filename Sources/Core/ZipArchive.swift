@@ -76,4 +76,44 @@ enum ZipArchive {
         }
         return url
     }
+
+    // MARK: - 内存解包（A 档默认路径）
+
+    /// 把 zip 读成「内部路径 → 内容」，交给 `body`，**不落盘、不起子进程**。
+    ///
+    /// 优先用 `ZipReader`（自己读中央目录 + 系统 zlib）；遇到它不支持的 zip
+    /// （ZIP64 / 加密 / 非 store-deflate）自动回退到 `ditto` 解临时目录再读进内存，
+    /// 保证兼容性 —— 用户不会因为「这本书的 ZIP 特别」而打不开。
+    static func withFileMap<T>(_ zipURL: URL, _ body: ([String: Data]) throws -> T) throws -> T {
+        if let files = try? ZipReader.read(zipURL) {
+            return try body(files)
+        }
+        return try withExtractedTree(zipURL) { root in
+            try body(try readTree(root))
+        }
+    }
+
+    /// 把解包目录递归读成「相对路径（`/` 分隔）→ 内容」。
+    static func readTree(_ root: URL) throws -> [String: Data] {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]) else {
+            throw ZipArchiveError.notReadable(root.path)
+        }
+        let rootPath = root.standardizedFileURL.path
+        var files: [String: Data] = [:]
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+            guard values?.isRegularFile == true else { continue }
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(rootPath + "/") else { continue }
+            let relative = String(path.dropFirst(rootPath.count + 1))
+            if let data = try? Data(contentsOf: url) {
+                files[relative] = data
+            }
+        }
+        return files
+    }
 }

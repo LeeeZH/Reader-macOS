@@ -278,7 +278,7 @@ Release 说明里必须写清楚三件事（0.2.0 起）：
 | 前置条件 | 状态 | 落在哪 |
 |---|---|---|
 | 1. `Book` 协议 | ✅ | `Sources/Core/Book.swift`，设计说明见[开发笔记 12](DEVELOPMENT.md#12-书籍格式抽象book-协议m7-epub-的前置)；单测 `[29]` |
-| 2. 零依赖 ZIP | ✅ 原型 | `Sources/Core/ZipArchive.swift`：`ditto -x -k` 解到临时目录，读完即删 |
+| 2. 零依赖 ZIP | ✅ | `Sources/Core/ZipReader.swift`：自己读 ZIP 中央目录 + 系统 zlib 解压到**内存**（不落盘、不起子进程）；ZIP64 / 加密等少数情况回退系统 `ditto` |
 | 3. EPUB 专用规范化 | ✅ 原型 | `Sources/Core/EpubDocument.swift`：`XMLDocument`（系统 libxml2）+ XPath 提取 `<body>` / `<title>`；`EpubText` 保留为兜底扫描器。独立于 `FormatText` |
 | 4. spine → 章 | ✅ 原型 | `Sources/Core/EpubParser.swift`：container.xml → OPF（manifest / spine / 书名）→ `nav.xhtml` / `toc.ncx` 标题 → spine 一条 = 一章 |
 
@@ -287,19 +287,22 @@ Release 说明里必须写清楚三件事（0.2.0 起）：
 - 夹具 `samples/古文观止.epub`（4369 B，3 章，由 `tools/make-epub-sample.py` 生成）：
   解包 + 解析 + 分页正常，渲染出来和同名 TXT 版**逐像素同一观感**。
 - 真实公版书 *Alice in Wonderland*（Project Gutenberg EPUB，188 KB、16.3 万码元、
-  13 章）：打开 + 解析约 **0.19s**（含进程冷启动），能读、能翻页、能按章跳转；
-  章节标题来自 nav，已经是对的（`CHAPTER I. Down the Rabbit-Hole` …），
-  不再是之前 h1 兜底时的书名 / 「第 N 节」。
+  13 章）：打开 + 解析约 **0.10s**（内存解包，含进程冷启动；`ditto` 那条路径是 0.19s），
+  能读、能翻页、能按章跳转；章节标题来自 nav，已经是对的
+  （`CHAPTER I. Down the Rabbit-Hole` …），不再是之前 h1 兜底时的书名 / 「第 N 节」。
+- 解包全程不落盘：`--dump-chapters` / 打开书之后临时目录里不会留下 `reader-unzip-*`。
 - `--epub-selftest`（`verify.sh` 4.15 步）覆盖正文 / 章节表 / 标题字体区间 /
   进度记忆（点第 2 章 → 重开回到第 2 章）；单测 `[30]` 覆盖 DOM 与扫描器两条提取路径、
-  nav / NCX / `<title>` 标题优先级、实体 / 注音 / 脚本清理、spine 跳过图片、临时目录清理。
+  nav / NCX / `<title>` 标题优先级、实体 / 注音 / 脚本清理、ZIP 中央目录解包、
+  EPUB 内部路径规范化（防目录穿越）、spine 跳过图片。
 
 **原型的已知限制**（0.3.0 先这样发，后续再补）
 
 - 图片 / 样式 / 注音（`<rt>`）/ **封面** / 页眉页脚全部忽略，只读纯文字；
 - 章节标题找不到 nav / NCX / `<title>` 时退回正文 `<h1>`–`<h6>` / 「第 N 节」；
   封面页、目录页仍按 spine 各占一章（要用 nav 过滤得再做一层）；
-- 每次打开都重新解包（临时目录用完即删），冷启动约 0.1–1s（随书大小）；
+- 每次打开都重新解包到内存（不落盘、不开临时目录），冷启动约 0.1s 量级；
+  ZIP64 / 加密等极少数书会回退系统 `ditto`（那条路径会用一个临时目录，读完即删）；
   书架不预扫描 EPUB 字数，没打开过的书先显示字符偏移；
 - TXT 的章节规则（`ChapterRule`）对 EPUB 不生效。
 

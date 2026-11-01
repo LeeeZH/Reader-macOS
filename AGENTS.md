@@ -42,10 +42,10 @@ READER_DEVTOOLS_QUIET=0 $B --shortcut-selftest
 ## 3. 构建与运行
 
 ```bash
-./build.sh          # 编译 → dist/Reader.app（零第三方依赖，纯 swiftc）
+./build.sh          # 编译 → dist/Reader.app（零第三方依赖；含极小的 C 桥接）
 ./run.sh            # 编译并启动
 ./run.sh --console  # 前台运行，看日志
-./test.sh           # 核心逻辑单测（649 项，秒级）
+./test.sh           # 核心逻辑单测（数量以输出为准，秒级）
 ./verify.sh         # 全量验证 —— 仅打包/发版前
 ```
 
@@ -57,7 +57,9 @@ READER_DEVTOOLS_QUIET=0 $B --shortcut-selftest
 
 ## 5. 代码约定（关键几条）
 
-- **零第三方依赖**，不引入 SwiftPM / Xcode 工程；只改 `Sources/` 里的 Swift 文件。
+- **零第三方依赖**：不引入 SwiftPM / Xcode 工程；不 vendor 第三方源码。
+  可以用 macOS 系统库（如 zlib / Foundation XML），C 桥接文件放 `Sources/Core/`
+  并同步加进 `build.sh` / `test.sh` 的编译命令；业务代码只写在 Swift 里。
 - `ShortcutAction.rawValue`、`.cache.dat` 的 header 字段名是**已发布的数据格式**，
   不能改名（会丢用户自定义键位 / 阅读进度）。
 - 菜单键位、状态栏 / 各窗口提示里的快捷键文案必须从设置实时取，**不要写死** `⌘X`。
