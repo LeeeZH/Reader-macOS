@@ -29,11 +29,12 @@ enum EpubParseError: Error, CustomStringConvertible {
 
 /// EPUB 书籍（原型）。正文 / 章节 / 偏移语义与 `TextBook` 完全一致：
 /// - `units` 是规范化后的 UTF-16 码元，进度 / 书签 / 章节锚点都用它的下标；
-/// - 一个 spine 条目 = 一章（合并该 XHTML 的正文），`titleLength` 取第一条标题的字符数，
-///   这样开头的 `<h1>` 会按「章节标题」的字体 / 颜色渲染（和 TXT 一致）。
+/// - 一个 spine 条目 = 一章（合并该 XHTML 的正文）；
+/// - 章节标题优先级：`nav.xhtml`（EPUB3）/ `toc.ncx`（EPUB2）→ 文档 `<title>` →
+///   正文开头的 `<h1>`–`<h6>` → 「第 N 节」；
+/// - `titleLength` 取正文开头标题行的字符数，这样标题字体 / 颜色对 EPUB 也生效。
 ///
-/// 原型限制（路线图 M7 前置 4 明确允许）：图片 / 样式 / 注音忽略；
-/// 章节标题只认 spine 文档里的 `<h1>`–`<h6>`，没有标题时用「第 N 节」；
+/// 原型限制（路线图 M7 前置 4 明确允许）：图片 / 样式 / 注音忽略，封面暂不显示；
 /// TXT 的章节规则（`ChapterRule`）对 EPUB 不生效。
 final class EpubBook: Book {
     let fileURL: URL
@@ -64,12 +65,15 @@ final class EpubBook: Book {
     func applyChapterRule(_ rule: ChapterRule) {}
 }
 
-/// EPUB 读取原型（路线图 M7 前置条件 2 / 3 / 4）。
+/// EPUB 读取（路线图 M7）。
 ///
-/// 流程：`ditto` 解包到临时目录（`ZipArchive`）→ `META-INF/container.xml`
-/// → OPF（manifest + spine）→ 逐个 spine 文档用 `EpubText` 提取正文 → 拼成
-/// `units` + 章节表。**不引入任何第三方依赖，也不改 `.cache.dat`**。
+/// 流程：`ZipArchive` 解包到临时目录 → `META-INF/container.xml` → OPF（manifest / spine /
+/// 书名）→ 读 `toc.ncx` / `nav.xhtml` 建「文件 → 章节标题」映射 → 逐个 spine 文档用
+/// `EpubDocument` 提取正文（`XMLDocument` + XPath，系统 libxml2）→ 拼成 `units` + 章节表。
+/// **不引入第三方依赖，也不改 `.cache.dat`**。
 enum EpubParser {
+
+    // MARK: - 入口
 
     /// - Parameters:
     ///   - extractedRoot: 已解包的 EPUB 根目录
@@ -80,6 +84,8 @@ enum EpubParser {
         let package = try readPackage(opf: opfURL)
 
         let opfDir = opfURL.deletingLastPathComponent()
+        let navigationTitles = readNavigationTitles(package: package, root: extractedRoot, opfDir: opfDir)
+
         var units: [UInt16] = []
         var chapters: [Chapter] = []
 
@@ -90,24 +96,29 @@ enum EpubParser {
             guard mediaType.contains("xhtml") || mediaType.contains("html") else { continue }
             guard let fileURL = resolve(root: extractedRoot, baseDir: opfDir, href: item.href),
                   FileManager.default.fileExists(atPath: fileURL.path) else { continue }
+
             let html = try readText(fileURL)
-            let paragraphs = EpubText.paragraphs(fromHTML: html)
-            guard !paragraphs.isEmpty else { continue }
+            let parsed = EpubDocument.parse(html: html)
+            guard !parsed.paragraphs.isEmpty else { continue }
 
             var chapterText = ""
-            var title = "第 \(chapters.count + 1) 节"
-            var titleLength = 0
-            for (index, paragraph) in paragraphs.enumerated() {
-                if index == 0, paragraph.isHeading {
-                    title = paragraph.text
-                    titleLength = paragraph.text.utf16.count
-                }
+            for (index, paragraph) in parsed.paragraphs.enumerated() {
                 // 段间留一个空行：上一段结尾的 "\n" + 这里的 "\n"，和 TXT 版排版后的观感一致
                 if index > 0 { chapterText += "\n" }
                 chapterText += paragraph.text
                 chapterText += "\n"
             }
             guard !chapterText.isEmpty else { continue }
+
+            let key = fileURL.standardizedFileURL.path
+            let navTitle = navigationTitles[key]
+            var title = navTitle ?? parsed.title ?? "第 \(chapters.count + 1) 节"
+            var titleLength = 0
+            if let first = parsed.paragraphs.first, first.isHeading {
+                // 没有 nav / <title> 时，正文开头的 h1 就是标题
+                if navTitle == nil, parsed.title == nil { title = first.text }
+                titleLength = first.text.utf16.count
+            }
 
             let chapterIndex = units.count
             units.append(contentsOf: chapterText.utf16)
@@ -116,26 +127,23 @@ enum EpubParser {
 
         guard !units.isEmpty, !chapters.isEmpty else { throw EpubParseError.emptySpine }
 
-        let title = package.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = title.isEmpty
+        let rawTitle = package.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = rawTitle.isEmpty
             ? bookURL.deletingPathExtension().lastPathComponent
-            : title
+            : rawTitle
         return EpubBook(fileURL: bookURL, displayName: name, units: units, chapters: chapters)
     }
 
     // MARK: - container.xml → OPF
 
     private static func rootfileURL(container: URL, root: URL) throws -> URL {
-        guard let data = try? Data(contentsOf: container) else {
+        guard let data = try? Data(contentsOf: container),
+              let doc = try? XMLDocument(data: data, options: [.nodePreserveWhitespace]) else {
             throw EpubParseError.missingContainer
         }
-        let parser = ContainerXMLParser()
-        let xml = XMLParser(data: data)
-        xml.delegate = parser
-        guard xml.parse(), let path = parser.rootfilePath else {
-            throw EpubParseError.malformedXML("META-INF/container.xml")
-        }
-        guard let url = resolve(root: root, baseDir: root, href: path),
+        guard let rootfile = EpubDocument.elements(doc, "//*[local-name()='rootfile']").first,
+              let path = EpubDocument.attribute(rootfile, "full-path"),
+              let url = resolve(root: root, baseDir: root, href: path),
               FileManager.default.fileExists(atPath: url.path) else {
             throw EpubParseError.missingRootfile
         }
@@ -144,15 +152,141 @@ enum EpubParser {
 
     // MARK: - OPF（manifest + spine + 书名）
 
-    private static func readPackage(opf: URL) throws -> EpubPackage {
-        guard let data = try? Data(contentsOf: opf) else {
-            throw EpubParseError.missingRootfile
+    private struct PackageItem {
+        var href: String
+        var mediaType: String
+        var properties: String
+    }
+
+    private struct Package {
+        var title = ""
+        var manifest: [String: PackageItem] = [:]
+        var spine: [String] = []
+        var spineTOC: String?
+    }
+
+    private static func readPackage(opf: URL) throws -> Package {
+        guard let data = try? Data(contentsOf: opf) else { throw EpubParseError.missingRootfile }
+        guard let doc = try? XMLDocument(data: data, options: [.nodePreserveWhitespace]) else {
+            throw EpubParseError.malformedXML("content.opf")
         }
-        let parser = PackageXMLParser()
-        let xml = XMLParser(data: data)
-        xml.delegate = parser
-        guard xml.parse() else { throw EpubParseError.malformedXML("content.opf") }
-        return parser.package
+
+        var package = Package()
+        package.title = EpubDocument
+            .elements(doc, "//*[local-name()='metadata']//*[local-name()='title']")
+            .first?.stringValue ?? ""
+
+        for item in EpubDocument.elements(doc, "//*[local-name()='manifest']/*[local-name()='item']") {
+            guard let id = EpubDocument.attribute(item, "id"),
+                  let href = EpubDocument.attribute(item, "href") else { continue }
+            package.manifest[id] = PackageItem(
+                href: href,
+                mediaType: EpubDocument.attribute(item, "media-type") ?? "",
+                properties: EpubDocument.attribute(item, "properties") ?? "")
+        }
+
+        for itemref in EpubDocument.elements(doc, "//*[local-name()='spine']/*[local-name()='itemref']") {
+            if let idref = EpubDocument.attribute(itemref, "idref"), !idref.isEmpty {
+                package.spine.append(idref)
+            }
+        }
+        if let spine = EpubDocument.elements(doc, "//*[local-name()='spine']").first {
+            package.spineTOC = EpubDocument.attribute(spine, "toc")
+        }
+
+        guard !package.manifest.isEmpty, !package.spine.isEmpty else {
+            throw EpubParseError.malformedPackage
+        }
+        return package
+    }
+
+    // MARK: - 目录（nav.xhtml / toc.ncx）
+
+    /// 返回「spine 文档的磁盘路径 → 章节标题」。
+    /// 先读 NCX（EPUB2），再用 nav.xhtml（EPUB3）覆盖：现代书两者都有时以 nav 为准。
+    private static func readNavigationTitles(package: Package, root: URL, opfDir: URL) -> [String: String] {
+        var titles: [String: String] = [:]
+
+        var ncxItem: PackageItem?
+        if let tocID = package.spineTOC {
+            ncxItem = package.manifest[tocID]
+        }
+        if ncxItem == nil {
+            ncxItem = package.manifest.values.first {
+                $0.mediaType.lowercased() == "application/x-dtbncx+xml"
+            }
+        }
+        if let item = ncxItem,
+           let url = resolve(root: root, baseDir: opfDir, href: item.href) {
+            for (key, value) in parseNCX(url: url, root: root) {
+                titles[key] = value
+            }
+        }
+
+        let navItem = package.manifest.values.first { item in
+            item.properties.split(whereSeparator: { $0.isWhitespace }).contains("nav")
+        }
+        if let item = navItem,
+           let url = resolve(root: root, baseDir: opfDir, href: item.href) {
+            for (key, value) in parseNavDocument(url: url, root: root) {
+                titles[key] = value
+            }
+        }
+        return titles
+    }
+
+    /// NCX：`navPoint/content@src` → `navLabel` 文本。
+    private static func parseNCX(url: URL, root: URL) -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
+              let doc = try? XMLDocument(data: data, options: [.nodePreserveWhitespace]) else {
+            return [:]
+        }
+        let baseDir = url.deletingLastPathComponent()
+        var titles: [String: String] = [:]
+
+        for navPoint in EpubDocument.elements(doc, "//*[local-name()='navPoint']") {
+            guard let content = EpubDocument.elements(navPoint, ".//*[local-name()='content']").first,
+                  let src = EpubDocument.attribute(content, "src"),
+                  let fileURL = resolve(root: root, baseDir: baseDir, href: src),
+                  let label = EpubDocument.elements(navPoint, ".//*[local-name()='navLabel']").first
+            else { continue }
+            let cleaned = EpubText.collapseWhitespace(label.stringValue ?? "")
+            guard !cleaned.isEmpty else { continue }
+            titles[fileURL.standardizedFileURL.path] = cleaned
+        }
+        return titles
+    }
+
+    /// EPUB3 `nav.xhtml`：只认 `epub:type="toc"` 的 nav（landmarks 里的 "Text" 之类不能当章节名）。
+    private static func parseNavDocument(url: URL, root: URL) -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
+              let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1),
+              let doc = EpubDocument.makeDocument(html) else { return [:] }
+        let baseDir = url.deletingLastPathComponent()
+
+        var navs = EpubDocument.elements(doc, "//*[local-name()='nav']")
+        let tocNavs = navs.filter(isTOCNav)
+        if !tocNavs.isEmpty { navs = tocNavs } else if navs.count > 1 { navs = [] }
+
+        var titles: [String: String] = [:]
+        for nav in navs {
+            for anchor in EpubDocument.elements(nav, ".//*[local-name()='a']") {
+                guard let href = EpubDocument.attribute(anchor, "href"),
+                      let fileURL = resolve(root: root, baseDir: baseDir, href: href) else { continue }
+                let cleaned = EpubText.collapseWhitespace(anchor.stringValue ?? "")
+                guard !cleaned.isEmpty, titles[fileURL.standardizedFileURL.path] == nil else { continue }
+                titles[fileURL.standardizedFileURL.path] = cleaned
+            }
+        }
+        return titles
+    }
+
+    private static func isTOCNav(_ nav: XMLElement) -> Bool {
+        let type = EpubDocument.attribute(nav, "epub:type")
+            ?? EpubDocument.attribute(nav, "type")
+        if let type, type.lowercased().contains("toc") { return true }
+        if let id = EpubDocument.attribute(nav, "id"), id.lowercased() == "toc" { return true }
+        return false
     }
 
     // MARK: - 路径 / 文件
@@ -180,91 +314,4 @@ enum EpubParser {
         if let text = String(data: data, encoding: .isoLatin1) { return text }
         return String(decoding: data, as: UTF8.self)
     }
-}
-
-// MARK: - XMLParser 代理
-
-/// OPF 解析出来的包定义
-fileprivate struct EpubPackageItem {
-    var href: String
-    var mediaType: String
-}
-
-fileprivate struct EpubPackage {
-    var title = ""
-    var manifest: [String: EpubPackageItem] = [:]
-    var spine: [String] = []
-}
-
-private final class ContainerXMLParser: NSObject, XMLParserDelegate {
-    var rootfilePath: String?
-
-    func parser(_ parser: XMLParser, didStartElement elementName: String,
-                namespaceURI: String?, qualifiedName qName: String?,
-                attributes attributeDict: [String: String] = [:]) {
-        guard rootfilePath == nil else { return }
-        guard localName(elementName) == "rootfile",
-              let path = attributeDict["full-path"], !path.isEmpty else { return }
-        rootfilePath = path
-    }
-}
-
-private final class PackageXMLParser: NSObject, XMLParserDelegate {
-    private(set) var package = EpubPackage()
-    private var inMetadata = false
-    private var inManifest = false
-    private var inSpine = false
-    private var capturingTitle = false
-    private var titleBuffer = ""
-
-    func parser(_ parser: XMLParser, didStartElement elementName: String,
-                namespaceURI: String?, qualifiedName qName: String?,
-                attributes attributeDict: [String: String] = [:]) {
-        switch localName(elementName) {
-        case "metadata":
-            inMetadata = true
-        case "title" where inMetadata:
-            capturingTitle = true
-            titleBuffer = ""
-        case "manifest":
-            inManifest = true
-        case "spine":
-            inSpine = true
-        case "item" where inManifest:
-            guard let id = attributeDict["id"], let href = attributeDict["href"] else { return }
-            package.manifest[id] = EpubPackageItem(
-                href: href, mediaType: attributeDict["media-type"] ?? "")
-        case "itemref" where inSpine:
-            if let idref = attributeDict["idref"] {
-                package.spine.append(idref)
-            }
-        default:
-            break
-        }
-    }
-
-    func parser(_ parser: XMLParser, didEndElement elementName: String,
-                namespaceURI: String?, qualifiedName qName: String?) {
-        switch localName(elementName) {
-        case "title" where capturingTitle:
-            package.title = titleBuffer
-            capturingTitle = false
-        case "metadata":
-            inMetadata = false
-        case "manifest":
-            inManifest = false
-        case "spine":
-            inSpine = false
-        default:
-            break
-        }
-    }
-
-    func parser(_ parser: XMLParser, foundCharacters string: String) {
-        if capturingTitle { titleBuffer += string }
-    }
-}
-
-private func localName(_ name: String) -> String {
-    name.split(separator: ":").last.map(String.init) ?? name
 }

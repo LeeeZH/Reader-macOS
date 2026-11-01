@@ -1,14 +1,20 @@
 import Foundation
 
-/// EPUB 的 HTML → 纯文本提取 + 规范化。
+/// EPUB 的**兜底**文本提取器（手写标签扫描器）。
+///
+/// 主力实现是 [EpubDocument](EpubDocument.swift)：用系统 `XMLDocument`（libxml2 的
+/// HTML 纠错解析器）+ XPath 取 `<body>` / `<title>`，对脏 XHTML 更稳。
+/// 这里保留扫描器有两个用途：
+/// 1. DOM 解析失败（极端畸形 / libxml2 拒收）时兜底，保证「书一定能打开」；
+/// 2. `EpubDocument` 自己也复用这里的 `collapseWhitespace` / 标签集合 / 实体解码。
 ///
 /// **为什么不复用 `TextNormalizer`（`FormatText`）**：那套规则是为
 /// **TXT 与 Windows 存档偏移兼容** 服务的（压缩空行、压前导空白、只认 CRLF/LF……），
 /// 硬套到 XHTML 上会把正文弄坏（`<p>` 之间的换行、HTML 实体、注音都会变形）。
-/// 所以 EPUB 单独有一套：先提取可读正文，再规范成「一段一行、段间无空行」的纯文本，
+/// 所以 EPUB 单独有一套：先提取可读正文，再规范成「一段一行、段间空行」的纯文本，
 /// 交给分页器。坐标仍然是 UTF-16 码元下标（`units`），与 TXT 一致。
 ///
-/// 这不是完整的 HTML 解析器，只做「提取可读正文」这一件事：
+/// 规则（DOM 和扫描器共用同一套语义）：
 /// - 注解 `<ruby><rt>`、`<script>`、`<style>`、`<head>` 整个丢弃（路线图 M7 前置 4）；
 /// - 图片（`<img>`）忽略，只保留文字；
 /// - 块级元素各算一段；`<br>` / `<hr>` 断行；
@@ -159,7 +165,7 @@ enum EpubText {
             guard let closeTag = html.range(of: needle, options: [.caseInsensitive],
                                            range: search..<html.endIndex) else { return nil }
             // 确保名字完整（`</script>` 不会匹配 `</scripts>`）
-            var after = closeTag.upperBound
+            let after = closeTag.upperBound
             if after < html.endIndex,
                (!html[after].isWhitespace && html[after] != ">") {
                 search = after

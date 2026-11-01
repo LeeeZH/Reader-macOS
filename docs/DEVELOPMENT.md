@@ -303,8 +303,9 @@ $B --shortcut-selftest
       `BookLoader` 是唯一加载入口；协议扩展给出章节偏移的默认实现，
       新格式只提供 `units` / `chapters` 即可。存档仍然只存路径 + 字符偏移
 - [x] **EPUB（原型，0.3.0）**：零依赖解包（系统 `ditto`）+ container.xml / OPF /
-      spine 解析，纯文字正文一个 spine 一条章节；`EpubText` 独立于 `FormatText`
-      （实体 / 注音 / 脚本清理，中文折行不落空格）；能分页 / 搜索 / 书签 / 记进度，
+      spine 解析，纯文字正文一个 spine 一条章节；文本提取用系统 `XMLDocument`
+      （libxml2）纠错 + XPath，`EpubText` 扫描器兜底；章节标题读 `nav.xhtml` /
+      `toc.ncx`（退回 `<title>` / `<h1>` / 「第 N 节」）；能分页 / 搜索 / 书签 / 记进度，
       编辑模式对只读格式自动置灰。限制见[路线图 M7](ROADMAP.md#m7-epub原型已跑通030-待发版)
 - [x] **触控栏支持**：翻页 / 进度 / 换章（上/下一章）/ 书签 / 字号，两侧 popover 收纳长尾操作
 
@@ -356,8 +357,9 @@ Reader/
     │   ├── TextSearch.swift      全文搜索（NSString 匹配 + 非重叠 + 上限）
     │   ├── Book.swift        `Book` 协议 + `BookLoader`（格式分发）+ `TextBook`
     │   ├── ZipArchive.swift     零依赖 ZIP：`ditto` 解到临时目录，用完即删（EPUB 用）
-    │   ├── EpubText.swift       EPUB 的 HTML → 段落（独立于 FormatText）
-    │   ├── EpubParser.swift     EPUB：container.xml → OPF → spine → `EpubBook`
+    │   ├── EpubDocument.swift   EPUB 的 XHTML → 段落 / 标题（XMLDocument + XPath）
+    │   ├── EpubText.swift       EPUB 兜底扫描器 + 空白 / 实体规则（独立于 FormatText）
+    │   ├── EpubParser.swift     EPUB：container.xml → OPF → nav/NCX → spine → `EpubBook`
     │   ├── JSONValue.swift   保序 JSON + 类型化访问器
     │   ├── CacheDocument.swift  `.cache.dat` 47 键 schema
     │   ├── LibraryStore.swift   存档读写 / 书架 / 进度 / 书签
@@ -671,19 +673,33 @@ M7 的实现是**原型级**：先证明「EPUB 值不值得做」这个方向�
   *Alice in Wonderland*（EPUB 134 KB、16.3 万码元）打开 + 解析约 **0.17s**
   （含进程冷启动），所以暂时不值得为它引入 libz 的复杂度和风险。
   以后书更大 / 更频繁打开时，再考虑用 libz 直接读中央目录 + inflate。
-- **HTML → 文本**：`EpubText` 是手写的标签扫描器（不是完整 HTML 解析器），
-  只做「提取可读正文」：丢弃 `script` / `style` / `head` / 注音 `rt` `rp`；
-  块级元素各成一段，`<br>` / `<hr>` 断行；实体解码。
+- **HTML → 文本（A 档：只用系统框架）**：主力是 `EpubDocument`，用 Foundation 的
+  `XMLDocument`（底层就是系统 libxml2）解析 XHTML，再 XPath 取 `//*[local-name()='body']`
+  和 `<title>`；`EpubText` 的手写扫描器保留为兜底（DOM 解析失败时仍能出文本）。
+  - **解析顺序**：先按**严格 XML** 解析（EPUB 规范要求 XHTML 合法，绝大多数书走这里，
+    中文 / 命名空间 / XPath 都正常）；失败（真实书里的脏 HTML：`<br>` 没闭合、
+    标签错嵌套）再走 `.documentTidyHTML`（libxml2 的 HTML 纠错解析器）。
+  - ⚠️ **踩过的坑**：HTML 解析器在没有 charset 声明时会把 UTF-8 当 Latin-1，中文全变乱码
+    （`<meta charset="utf-8">` 它也不认）；必须显式补
+    `http-equiv="Content-Type" content="text/html; charset=utf-8"`。
+    另外 XML 不认识的具名实体（`&nbsp;` `&hellip;` …）要先换成字符，否则严格 XML 解析失败。
   - **为什么不复用 `FormatText`**：那套规则是为 **TXT 与 Windows 存档偏移兼容**
     服务的（压缩空行、压前导空白、只认 `\r\n` / `\n`），套到 XHTML 上会把
-    `<p>` 之间的换行、实体、注音都弄坏。EPUB 正文先由 `EpubText` 规范成
+    `<p>` 之间的换行、实体、注音都弄坏。EPUB 正文先规范成
     「一段一行、段间空行」的纯文本，再交给同一个分页器 —— 坐标仍然是 UTF-16 码元。
   - **折行空格**：XHTML 里中文常逐行硬折，源码换行产生的空白在中文之间直接丢弃
     （否则每个汉字之间都会被塞一个空格）；**同一行里真正的空格要保留**
     （「第一章 桃花源记」的词间空格是内容）。这条规则单测 `[30]` 钉住了。
+- **目录 → 章节标题**：读 OPF 的 `manifest` 找 NCX（`spine@toc` 或
+  `application/x-dtbncx+xml`）和 EPUB3 的 `nav`（`properties="nav"`），
+  解析成「spine 文档路径 → 标题」映射：NCX 的 `navPoint/content@src` → `navLabel`，
+  nav 里只认 `epub:type="toc"` 的 `<nav>`（landmarks 里的 "Text" 不能当章节名）。
+  标题优先级：nav → NCX → 文档 `<title>` → 正文开头 `<h1>`–`<h6>` → 「第 N 节」。
+  实测 Gutenberg *Alice* 的章节名从「书名 / 第 N 节」变成了
+  `CHAPTER I. Down the Rabbit-Hole` 这种正确标题。
 - **章节**：一个 spine 条目 = 一章，`chapters[i].index` 是累计码元偏移；
-  文档开头的 `<h1>`–`<h6>` 当章节标题（`titleLength` = 标题长度，于是标题字体 /
-  颜色对 EPUB 也生效），没有标题就「第 N 节」；图片 / 字体等非文本 spine 条目跳过。
+  `titleLength` 取正文开头标题行的字符数，于是标题字体 / 颜色对 EPUB 也生效；
+  图片 / 字体等非文本 spine 条目跳过。
 - **打开流程**：`BookLoader.isPlainText` 分派，EPUB 走 `makeEpubBook`（同步阻塞，
   由 `openQueue` 放后台）。`.cache.dat` 只记路径 + 偏移，所以进度 / 书签开箱即用；
   编辑模式按 `Book.supportsEditing` 自动置灰。

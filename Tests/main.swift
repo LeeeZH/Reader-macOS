@@ -2290,7 +2290,20 @@ eq(EpubText.paragraphs(fromHTML: "<p><ruby>汉<rt>hàn</rt></ruby>字</p>").map(
    ["汉字"], "注音 rt 丢弃，只留基字")
 eq(EpubText.paragraphs(fromHTML: "<!-- 注释 --><p>正文</p>").map(\.text), ["正文"], "HTML 注释忽略")
 
-// 30.2 造一个最小 EPUB（container.xml + OPF + 2 个 XHTML）
+// 30.2 DOM 提取（A 档：Foundation XMLDocument / 系统 libxml2）
+let domParsed = EpubDocument.parse(
+    html: "<html><head><title>文件标题</title></head><body><h1>标题行</h1><p>段一</p><p>段二 &amp; 实体</p></body></html>")
+eq(domParsed.title ?? "", "文件标题", "DOM 能取 <title>")
+eq(domParsed.paragraphs.map(\.text), ["标题行", "段一", "段二 & 实体"],
+   "DOM 提取段落 + 实体解码")
+check(domParsed.paragraphs.first?.isHeading ?? false, "DOM 识别 h1 为标题")
+let brokenParsed = EpubDocument.parse(html: "<html><body><p>第一段<p>第二段")
+eq(brokenParsed.paragraphs.map(\.text), ["第一段", "第二段"],
+   "★ 缺闭合的脏 HTML 也能被纠错解析（DOM 比手写扫描器稳）")
+eq(EpubDocument.parse(html: "<html><body><script>alert(1)</script><p>正文</p></body></html>")
+    .paragraphs.map(\.text), ["正文"], "DOM 丢弃 script")
+
+// 30.3 造一个最小 EPUB（container + OPF + NCX + nav + 3 个 XHTML）
 let epubTree = tmp.appendingPathComponent("epub-tree")
 try? FileManager.default.removeItem(at: epubTree)
 try FileManager.default.createDirectory(at: epubTree.appendingPathComponent("META-INF"),
@@ -2320,38 +2333,75 @@ let opfXML = """
   <manifest>
     <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
     <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch3" href="ch3.xhtml" media-type="application/xhtml+xml"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
     <item id="cover" href="cover.png" media-type="image/png"/>
   </manifest>
-  <spine>
+  <spine toc="ncx">
     <itemref idref="ch1"/>
     <itemref idref="ch2"/>
+    <itemref idref="ch3"/>
   </spine>
 </package>
 """
 try opfXML.write(to: epubTree.appendingPathComponent("OEBPS/content.opf"),
                  atomically: true, encoding: .utf8)
-try "<html><body><h1>第一章 开始</h1><p>正文一</p></body></html>"
+
+// ch1：nav 标题优先于 <title> 和 h1
+try "<html><head><title>文件标题一</title></head><body><h1>第一章 开始</h1><p>正文一</p></body></html>"
     .write(to: epubTree.appendingPathComponent("OEBPS/ch1.xhtml"), atomically: true, encoding: .utf8)
+// ch2：只有 NCX 标题
 try "<html><body><p>只有正文</p></body></html>"
     .write(to: epubTree.appendingPathComponent("OEBPS/ch2.xhtml"), atomically: true, encoding: .utf8)
+// ch3：既无 nav 也无 NCX，用文档 <title>
+try "<html><head><title>文件标题三</title></head><body><p>第三章正文</p></body></html>"
+    .write(to: epubTree.appendingPathComponent("OEBPS/ch3.xhtml"), atomically: true, encoding: .utf8)
+
+let navXHTML = """
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>目录</title></head>
+<body><nav epub:type="toc" id="toc"><ol>
+  <li><a href="ch1.xhtml">导航 第一章</a></li>
+</ol></nav></body></html>
+"""
+try navXHTML.write(to: epubTree.appendingPathComponent("OEBPS/nav.xhtml"),
+                   atomically: true, encoding: .utf8)
+
+let ncxXML = """
+<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n1" playOrder="1"><navLabel><text>NCX 第一章</text></navLabel>
+      <content src="ch1.xhtml"/></navPoint>
+    <navPoint id="n2" playOrder="2"><navLabel><text>NCX 第二章</text></navLabel>
+      <content src="ch2.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+try ncxXML.write(to: epubTree.appendingPathComponent("OEBPS/toc.ncx"),
+                 atomically: true, encoding: .utf8)
 
 let parsedEpub = try EpubParser.load(extractedRoot: epubTree,
                                      bookURL: tmp.appendingPathComponent("测试书.epub"))
 eq(parsedEpub.displayName, "测试书", "书名取 OPF 的 dc:title")
-eq(parsedEpub.chapters.count, 2, "spine 2 条 → 2 章（图片条目被跳过）")
-eq(parsedEpub.chapters[0].title, "第一章 开始", "第一章标题取 h1")
-eq(parsedEpub.chapters[1].title, "第 2 节", "没有 h1 的章节用「第 N 节」兜底")
-check(parsedEpub.chapters[0].titleLength > 0, "有标题时 titleLength > 0（标题字体能生效）")
-eq(parsedEpub.chapters[1].titleLength, 0, "无标题时 titleLength = 0")
+eq(parsedEpub.chapters.count, 3, "spine 3 条 → 3 章（图片 / 目录条目被跳过）")
+eq(parsedEpub.chapters[0].title, "导航 第一章", "★ EPUB3 nav 标题优先于 <title> / h1")
+eq(parsedEpub.chapters[1].title, "NCX 第二章", "★ EPUB2 NCX 标题生效")
+eq(parsedEpub.chapters[2].title, "文件标题三", "★ 没有 nav/NCX 时退回文档 <title>")
+check(parsedEpub.chapters[0].titleLength > 0, "有标题行时 titleLength > 0（标题字体能生效）")
+eq(parsedEpub.chapters[1].titleLength, 0, "正文开头没有标题行时 titleLength = 0")
 let expectedSecondIndex = "第一章 开始\n\n正文一\n".utf16.count
 eq(parsedEpub.chapters[1].index, expectedSecondIndex, "第二章偏移 = 第一章正文长度")
 eq(parsedEpub.totalLength, parsedEpub.units.count, "总长度 = 规范化后的码元数")
 check(parsedEpub.isChapterStart(at: parsedEpub.chapters[1].index), "第二章起点可识别")
 check(parsedEpub.isChapterTitle(at: parsedEpub.chapters[0].index), "标题首字算标题")
 eq(parsedEpub.chapterIndex(at: parsedEpub.chapters[1].index), 1, "chapterIndex 命中第 2 章")
-check(String(decoding: parsedEpub.units, as: UTF16.self).contains("只有正文"), "正文拼接正确")
+let epubBodyText = String(decoding: parsedEpub.units, as: UTF16.self)
+check(epubBodyText.contains("只有正文"), "正文拼接正确")
+check(epubBodyText.contains("第三章正文"), "第三章正文也在")
 
-// 30.3 ZIP：ditto 解包 → 临时目录用完即删
+// 30.4 ZIP：ditto 解包 → 临时目录用完即删
 let epubZip = tmp.appendingPathComponent("测试书.epub")
 let packer = Process()
 packer.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
@@ -2377,14 +2427,14 @@ do {
     check(true, "缺少条目抛出可读错误")
 }
 
-// 30.4 BookLoader 分发 + 端到端读一本书
+// 30.5 BookLoader 分发 + 端到端读一本书
 check(BookLoader.supports(epubZip), "BookLoader 认得 .epub")
 check(!BookLoader.supports(tmp.appendingPathComponent("a.pdf")), ".pdf 不在支持列表里")
 check(BookLoader.isPlainText(epubZip) == false, "EPUB 不走纯文本解码")
 eq(BookLoader.totalLength(ofFileAt: epubZip), nil, "EPUB 不做书架预扫描（打开后回填）")
 let epubBook = try BookLoader.makeEpubBook(url: epubZip)
 eq(epubBook.encodingName, "EPUB", "格式名是 EPUB")
-eq(epubBook.chapters.count, 2, "BookLoader 读出的章节数一致")
+eq(epubBook.chapters.count, 3, "BookLoader 读出的章节数一致")
 eq(epubBook.findText.length, epubBook.units.count, "搜索缓存长度与正文一致")
 check(!epubBook.supportsEditing, "EPUB 是只读格式")
 
